@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked --all-extras
+      - run: uv run ruff check .
+      - run: uv run pytest
+      - run: uv run cvbench-dataset validate examples/minimal-certified
+      - run: >-
+          uv run cvbench-dataset build-release examples/minimal-certified
+          --output /tmp/minimal-synthetic-1.0.0.tar.gz
+      - run: >-
+          uv run cvbench-dataset verify-release examples/minimal-certified
+          --archive /tmp/minimal-synthetic-1.0.0.tar.gz

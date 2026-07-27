@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cvbench.dev/schemas/review-v1.schema.json",
+  "title": "CVBench clip review event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "review_id",
+    "clip_id",
+    "reviewed_at",
+    "reviewer",
+    "decision",
+    "scope",
+    "artifacts",
+    "rationale"
+  ],
+  "properties": {
+    "schema_version": {"const": "cvbench.review/v1"},
+    "review_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$"},
+    "clip_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"},
+    "reviewed_at": {"type": "string", "format": "date-time"},
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "independent"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z0-9@._-]{1,200}$"},
+        "kind": {"enum": ["human", "agent"]},
+        "independent": {"type": "boolean"}
+      }
+    },
+    "decision": {"enum": ["approve", "reject"]},
+    "scope": {"const": "all_annotations"},
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["video_sha256", "tracks_sha256", "source_sha256"],
+      "properties": {
+        "video_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "tracks_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "rationale": {"type": "string", "minLength": 1, "maxLength": 4000}
+  }
+}

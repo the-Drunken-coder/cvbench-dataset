@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cvbench.dev/schemas/release-manifest-v1.schema.json",
+  "title": "CVBench dataset release manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "hash_algorithm",
+    "dataset",
+    "files",
+    "clips",
+    "manifest_content_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "cvbench.dataset-release/v1"},
+    "hash_algorithm": {"const": "sha256"},
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "state",
+        "data_role",
+        "annotation_scope",
+        "evaluation_eligible",
+        "certified_at"
+      ],
+      "properties": {
+        "id": {"type": "string"},
+        "version": {"type": "string"},
+        "state": {"const": "certified"},
+        "data_role": {"enum": ["training_only", "benchmark_candidate", "benchmark_truth"]},
+        "annotation_scope": {
+          "enum": ["exhaustive_visible", "class_exhaustive", "sparse", "activity_bounded"]
+        },
+        "evaluation_eligible": {"type": "boolean"},
+        "certified_at": {"type": "string", "format": "date-time"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"evaluation_eligible": {"const": true}},
+            "required": ["evaluation_eligible"]
+          },
+          "then": {
+            "properties": {
+              "data_role": {"const": "benchmark_truth"},
+              "annotation_scope": {"const": "exhaustive_visible"}
+            }
+          }
+        }
+      ]
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "bytes", "sha256", "role"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "bytes": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "role": {
+            "enum": [
+              "dataset_descriptor",
+              "license",
+              "media",
+              "provenance",
+              "review",
+              "schema",
+              "truth"
+            ]
+          }
+        }
+      }
+    },
+    "clips": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "path",
+          "video_sha256",
+          "tracks_sha256",
+          "source_sha256",
+          "review_sha256",
+          "annotation_rows",
+          "annotation_origins",
+          "approved_reviewers"
+        ],
+        "properties": {
+          "id": {"type": "string"},
+          "path": {"type": "string"},
+          "video_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "tracks_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "review_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "annotation_rows": {"type": "integer", "minimum": 0},
+          "annotation_origins": {
+            "type": "object",
+            "additionalProperties": {"type": "integer", "minimum": 0}
+          },
+          "approved_reviewers": {
+            "type": "array",
+            "minItems": 2,
+            "uniqueItems": true,
+            "items": {"type": "string"}
+          }
+        }
+      }
+    },
+    "manifest_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

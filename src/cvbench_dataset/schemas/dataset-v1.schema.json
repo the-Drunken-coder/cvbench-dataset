@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cvbench.dev/schemas/dataset-v1.schema.json",
+  "title": "CVBench dataset descriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "version",
+    "title",
+    "description",
+    "state",
+    "data_role",
+    "annotation_scope",
+    "evaluation_eligible",
+    "ontology",
+    "clips",
+    "certification"
+  ],
+  "properties": {
+    "schema_version": {"const": "cvbench.dataset/v1"},
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"},
+    "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "title": {"type": "string", "minLength": 1, "maxLength": 200},
+    "description": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "state": {"enum": ["draft", "reviewed", "certified"]},
+    "data_role": {"enum": ["training_only", "benchmark_candidate", "benchmark_truth"]},
+    "annotation_scope": {
+      "enum": ["exhaustive_visible", "class_exhaustive", "sparse", "activity_bounded"]
+    },
+    "evaluation_eligible": {"type": "boolean"},
+    "ontology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classes"],
+      "properties": {
+        "classes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "description"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+              "description": {"type": "string", "minLength": 1, "maxLength": 500}
+            }
+          }
+        }
+      }
+    },
+    "clips": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "path"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"},
+          "path": {"type": "string", "pattern": "^clips/[a-z0-9][a-z0-9-]{1,63}$"}
+        }
+      }
+    },
+    "certification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "required_independent_approvals"],
+      "properties": {
+        "policy": {"const": "cvbench.dataset-certification/v1"},
+        "required_independent_approvals": {"type": "integer", "minimum": 2, "maximum": 10},
+        "certified_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"state": {"const": "certified"}}},
+      "then": {
+        "properties": {
+          "certification": {"required": ["certified_at"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"evaluation_eligible": {"const": true}}},
+      "then": {
+        "properties": {
+          "state": {"const": "certified"},
+          "data_role": {"const": "benchmark_truth"},
+          "annotation_scope": {"const": "exhaustive_visible"}
+        }
+      }
+    }
+  ]
+}

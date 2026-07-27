@@ -1,0 +1,42 @@
+{
+  "archives": {
+    "rvmot-a1c9": {
+      "frame_archive": {
+        "bytes": 16445440,
+        "path": "scenarios/real-video-v2/archives/rvmot-a1c9.frames.tar",
+        "sha256": "32495eec11917c97c1da4dc160f46293c3e025adaa0cbdb67c4fc1637b91716f"
+      },
+      "review_archive": {
+        "bytes": 2990080,
+        "path": "scenarios/real-video-v2/archives/rvmot-a1c9.visual-audit.tar",
+        "sha256": "f62956e9a6d5dfd7cb0075d65deb39d2c17166b4987840de8763b7516366e46a"
+      }
+    },
+    "rvmot-b7e2": {
+      "frame_archive": {
+        "bytes": 16496640,
+        "path": "scenarios/real-video-v2/archives/rvmot-b7e2.frames.tar",
+        "sha256": "0c50c3247ce0d1807e94ee14ee9866bce3eb88c273d1b3f9e052e9abe5b78b63"
+      },
+      "review_archive": {
+        "bytes": 3031040,
+        "path": "scenarios/real-video-v2/archives/rvmot-b7e2.visual-audit.tar",
+        "sha256": "3c179e1d77436202ff0474fb7ccb58d9af6a47f42e4c5c6ee765a1278d871d7e"
+      }
+    },
+    "rvmot-c4f6": {
+      "frame_archive": {
+        "bytes": 9932800,
+        "path": "scenarios/real-video-v2/archives/rvmot-c4f6.frames.tar",
+        "sha256": "c4d356f3f577859d562d537abe0a3fcfb45dc5da8572201e8eb00b5cd0ca2566"
+      },
+      "review_archive": {
+        "bytes": 2355200,
+        "path": "scenarios/real-video-v2/archives/rvmot-c4f6.visual-audit.tar",
+        "sha256": "f188d37469a9e98b8a9dfc8ebdf1fd8c6291ef8f8aacf8abaee1bb49533ca6d6"
+      }
+    }
+  },
+  "frame_count": 450,
+  "schema_version": "cvbench.real-video-archives/v1"
+}

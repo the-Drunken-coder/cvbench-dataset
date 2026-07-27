@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cvbench.dev/schemas/source-v1.schema.json",
+  "title": "CVBench clip source provenance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "clip_id",
+    "source",
+    "media",
+    "transformations",
+    "model_runs"
+  ],
+  "properties": {
+    "schema_version": {"const": "cvbench.source/v1"},
+    "clip_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "uri", "sha256", "license"],
+      "properties": {
+        "title": {"type": "string", "minLength": 1, "maxLength": 500},
+        "uri": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "license": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["spdx", "name", "url", "file"],
+          "properties": {
+            "spdx": {"type": "string", "pattern": "^[A-Za-z0-9.+-]{2,80}$"},
+            "name": {"type": "string", "minLength": 1, "maxLength": 200},
+            "url": {"type": "string", "minLength": 1, "maxLength": 2000},
+            "file": {"type": "string", "pattern": "^licenses/[A-Za-z0-9._-]+$"}
+          }
+        }
+      }
+    },
+    "media": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height", "frame_count", "fps_numerator", "fps_denominator"],
+      "properties": {
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+        "frame_count": {"type": "integer", "minimum": 1},
+        "fps_numerator": {"type": "integer", "minimum": 1},
+        "fps_denominator": {"type": "integer", "minimum": 1}
+      }
+    },
+    "transformations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "description"],
+        "properties": {
+          "kind": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+          "description": {"type": "string", "minLength": 1, "maxLength": 2000},
+          "tool": {"type": "string", "minLength": 1, "maxLength": 500},
+          "config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "model_runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "model_name",
+          "model_version",
+          "weights_uri",
+          "weights_sha256",
+          "code_revision",
+          "config_sha256",
+          "raw_output_sha256",
+          "command",
+          "license"
+        ],
+        "properties": {
+          "run_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$"},
+          "model_name": {"type": "string", "minLength": 1, "maxLength": 200},
+          "model_version": {"type": "string", "minLength": 1, "maxLength": 200},
+          "weights_uri": {"type": "string", "minLength": 1, "maxLength": 2000},
+          "weights_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "code_revision": {"type": "string", "minLength": 7, "maxLength": 200},
+          "config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "raw_output_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "command": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1, "maxLength": 1000}
+          },
+          "license": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["spdx", "url"],
+            "properties": {
+              "spdx": {"type": "string", "pattern": "^[A-Za-z0-9.+-]{2,80}$"},
+              "url": {"type": "string", "minLength": 1, "maxLength": 2000}
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+28f3e611dd51b23dec42c499ab4e7ea53f4512f2147e8f08ca9c47567b221666  legacy/real-video-v2/snapshot/README.md
+35bf088a45dbaa2ea4890650c88d94bd0edb2eb915807147e8b19d9cbe144dce  legacy/real-video-v2/snapshot/archives.json
+32495eec11917c97c1da4dc160f46293c3e025adaa0cbdb67c4fc1637b91716f  legacy/real-video-v2/snapshot/archives/rvmot-a1c9.frames.tar
+f62956e9a6d5dfd7cb0075d65deb39d2c17166b4987840de8763b7516366e46a  legacy/real-video-v2/snapshot/archives/rvmot-a1c9.visual-audit.tar
+0c50c3247ce0d1807e94ee14ee9866bce3eb88c273d1b3f9e052e9abe5b78b63  legacy/real-video-v2/snapshot/archives/rvmot-b7e2.frames.tar
+3c179e1d77436202ff0474fb7ccb58d9af6a47f42e4c5c6ee765a1278d871d7e  legacy/real-video-v2/snapshot/archives/rvmot-b7e2.visual-audit.tar
+c4d356f3f577859d562d537abe0a3fcfb45dc5da8572201e8eb00b5cd0ca2566  legacy/real-video-v2/snapshot/archives/rvmot-c4f6.frames.tar
+f188d37469a9e98b8a9dfc8ebdf1fd8c6291ef8f8aacf8abaee1bb49533ca6d6  legacy/real-video-v2/snapshot/archives/rvmot-c4f6.visual-audit.tar
+996ed27a166183d3c4418a84dcaf0a78d7426137701dcac142a5b5397c2175a9  legacy/real-video-v2/snapshot/corpus-fingerprint.txt
+636a3f0224d15a9c4b62ccca79266922364343226b93bd38a1e630777a8de0a9  legacy/real-video-v2/snapshot/expected-frame-sha256.txt
+0d920f2d380fa4fe656f1424e7d8ea2e4021d90f1702dcd5e41dcbec75e3d292  legacy/real-video-v2/snapshot/rvmot-a1c9/ground_truth.jsonl
+2fddd904faccaa6c6dc7120eaf48d518b5c34b7189e46ba4c107c72dca64becc  legacy/real-video-v2/snapshot/rvmot-a1c9/scenario.yaml
+f2581e4f38e1986fcd99b1db4fe3ac99fac4b992bc1c65a8776e7dc10cdb414f  legacy/real-video-v2/snapshot/rvmot-b7e2/ground_truth.jsonl
+8e11277f8a71365e8728a54ce2badb18ce51b6bac075ead985d8d3b5f7c3ccec  legacy/real-video-v2/snapshot/rvmot-b7e2/scenario.yaml
+44912de9405ddda545f6052728ce4ac9141b07cf18b38a04582aaa861dfb3ac4  legacy/real-video-v2/snapshot/rvmot-c4f6/ground_truth.jsonl
+4984829c2d7fce521546b67d702b4e4ce6276edf96785fb1b3ccad8a1443c141  legacy/real-video-v2/snapshot/rvmot-c4f6/scenario.yaml
+bea5ed5f64169d548ca4b1921b25350a5a40173641f2d8deaf0cfcd9cc04fe26  legacy/real-video-v2/snapshot/visual-audit.json

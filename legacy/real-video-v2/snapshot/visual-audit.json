@@ -1,0 +1,808 @@
+{
+  "annotation_commit": "421841a75577b697c314e952e585aecbb1b99e17",
+  "audit_scope": {
+    "frame_indexes": [
+      0,
+      149
+    ],
+    "method": "Every full-resolution frame was inspected in sequence and again in six 25-frame overlay sheets per scenario. Activity geometry was checked for complete visible physical-object spans; no temporal interpolation is accepted.",
+    "supported_classes": [
+      "person",
+      "vehicle",
+      "dog"
+    ]
+  },
+  "clips": {
+    "rvmot-a1c9": {
+      "corrections": [],
+      "omitted_supported_movers": [],
+      "status": "complete"
+    },
+    "rvmot-b7e2": {
+      "corrections": [
+        {
+          "bootstrap": "The frame-90 upstream box was propagated backward only after every frame was visually checked to keep the complete visible SUV and open hatch inside the box.",
+          "class_id": "vehicle",
+          "constant_box_ranges": [
+            {
+              "bbox_xyxy": [
+                0.0,
+                205.333,
+                173.133,
+                431.2
+              ],
+              "frame_indexes": [
+                0,
+                89
+              ]
+            }
+          ],
+          "reason": "MEVA activity geometry begins at output frame 90 although the same visible SUV participates throughout the complete window.",
+          "target_id": "v-001",
+          "upstream_source_ids": [
+            23
+          ]
+        }
+      ],
+      "omitted_supported_movers": [],
+      "status": "corrected-and-complete"
+    },
+    "rvmot-c4f6": {
+      "corrections": [
+        {
+          "bootstrap": "Per-frame foreground-difference candidates; every resulting box was visually inspected against the full-resolution frame.",
+          "class_id": "person",
+          "reason": "MEVA activity geometry stops at output frame 71 although the person remains visibly moving through frame 149.",
+          "rows": [
+            {
+              "bbox_xyxy": [
+                728,
+                467,
+                755,
+                500
+              ],
+              "frame_index": 72
+            },
+            {
+              "bbox_xyxy": [
+                727,
+                466,
+                755,
+                500
+              ],
+              "frame_index": 73
+            },
+            {
+              "bbox_xyxy": [
+                727,
+                465,
+                754,
+                500
+              ],
+              "frame_index": 74
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                464,
+                754,
+                500
+              ],
+              "frame_index": 75
+            },
+            {
+              "bbox_xyxy": [
+                725,
+                463,
+                754,
+                500
+              ],
+              "frame_index": 76
+            },
+            {
+              "bbox_xyxy": [
+                725,
+                463,
+                754,
+                500
+              ],
+              "frame_index": 77
+            },
+            {
+              "bbox_xyxy": [
+                724,
+                462,
+                753,
+                500
+              ],
+              "frame_index": 78
+            },
+            {
+              "bbox_xyxy": [
+                723,
+                461,
+                753,
+                500
+              ],
+              "frame_index": 79
+            },
+            {
+              "bbox_xyxy": [
+                724,
+                461,
+                753,
+                500
+              ],
+              "frame_index": 80
+            },
+            {
+              "bbox_xyxy": [
+                723,
+                460,
+                753,
+                500
+              ],
+              "frame_index": 81
+            },
+            {
+              "bbox_xyxy": [
+                723,
+                460,
+                753,
+                500
+              ],
+              "frame_index": 82
+            },
+            {
+              "bbox_xyxy": [
+                723,
+                460,
+                753,
+                500
+              ],
+              "frame_index": 83
+            },
+            {
+              "bbox_xyxy": [
+                723,
+                460,
+                753,
+                500
+              ],
+              "frame_index": 84
+            },
+            {
+              "bbox_xyxy": [
+                723,
+                460,
+                753,
+                500
+              ],
+              "frame_index": 85
+            },
+            {
+              "bbox_xyxy": [
+                723,
+                460,
+                753,
+                500
+              ],
+              "frame_index": 86
+            },
+            {
+              "bbox_xyxy": [
+                723,
+                460,
+                753,
+                500
+              ],
+              "frame_index": 87
+            },
+            {
+              "bbox_xyxy": [
+                724,
+                459,
+                753,
+                500
+              ],
+              "frame_index": 88
+            },
+            {
+              "bbox_xyxy": [
+                724,
+                458,
+                753,
+                500
+              ],
+              "frame_index": 89
+            },
+            {
+              "bbox_xyxy": [
+                724,
+                458,
+                753,
+                500
+              ],
+              "frame_index": 90
+            },
+            {
+              "bbox_xyxy": [
+                725,
+                457,
+                753,
+                500
+              ],
+              "frame_index": 91
+            },
+            {
+              "bbox_xyxy": [
+                725,
+                456,
+                753,
+                500
+              ],
+              "frame_index": 92
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                455,
+                753,
+                500
+              ],
+              "frame_index": 93
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                454,
+                753,
+                500
+              ],
+              "frame_index": 94
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                453,
+                753,
+                500
+              ],
+              "frame_index": 95
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                453,
+                753,
+                500
+              ],
+              "frame_index": 96
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                452,
+                753,
+                500
+              ],
+              "frame_index": 97
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                452,
+                753,
+                500
+              ],
+              "frame_index": 98
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                452,
+                753,
+                500
+              ],
+              "frame_index": 99
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                452,
+                753,
+                500
+              ],
+              "frame_index": 100
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                452,
+                753,
+                500
+              ],
+              "frame_index": 101
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                452,
+                753,
+                500
+              ],
+              "frame_index": 102
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                452,
+                753,
+                500
+              ],
+              "frame_index": 103
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                452,
+                753,
+                500
+              ],
+              "frame_index": 104
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                451,
+                753,
+                500
+              ],
+              "frame_index": 105
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                451,
+                753,
+                500
+              ],
+              "frame_index": 106
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                450,
+                753,
+                500
+              ],
+              "frame_index": 107
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                449,
+                753,
+                500
+              ],
+              "frame_index": 108
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                449,
+                753,
+                500
+              ],
+              "frame_index": 109
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                447,
+                753,
+                500
+              ],
+              "frame_index": 110
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                447,
+                752,
+                500
+              ],
+              "frame_index": 111
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                446,
+                752,
+                500
+              ],
+              "frame_index": 112
+            },
+            {
+              "bbox_xyxy": [
+                726,
+                446,
+                752,
+                500
+              ],
+              "frame_index": 113
+            },
+            {
+              "bbox_xyxy": [
+                727,
+                445,
+                752,
+                500
+              ],
+              "frame_index": 114
+            },
+            {
+              "bbox_xyxy": [
+                727,
+                445,
+                752,
+                500
+              ],
+              "frame_index": 115
+            },
+            {
+              "bbox_xyxy": [
+                727,
+                445,
+                753,
+                500
+              ],
+              "frame_index": 116
+            },
+            {
+              "bbox_xyxy": [
+                727,
+                445,
+                753,
+                500
+              ],
+              "frame_index": 117
+            },
+            {
+              "bbox_xyxy": [
+                727,
+                445,
+                753,
+                500
+              ],
+              "frame_index": 118
+            },
+            {
+              "bbox_xyxy": [
+                728,
+                445,
+                753,
+                500
+              ],
+              "frame_index": 119
+            },
+            {
+              "bbox_xyxy": [
+                728,
+                445,
+                753,
+                500
+              ],
+              "frame_index": 120
+            },
+            {
+              "bbox_xyxy": [
+                728,
+                444,
+                753,
+                500
+              ],
+              "frame_index": 121
+            },
+            {
+              "bbox_xyxy": [
+                728,
+                444,
+                754,
+                500
+              ],
+              "frame_index": 122
+            },
+            {
+              "bbox_xyxy": [
+                729,
+                444,
+                754,
+                500
+              ],
+              "frame_index": 123
+            },
+            {
+              "bbox_xyxy": [
+                729,
+                443,
+                754,
+                500
+              ],
+              "frame_index": 124
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                442,
+                754,
+                500
+              ],
+              "frame_index": 125
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                441,
+                754,
+                500
+              ],
+              "frame_index": 126
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                440,
+                754,
+                500
+              ],
+              "frame_index": 127
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                440,
+                754,
+                500
+              ],
+              "frame_index": 128
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                440,
+                755,
+                500
+              ],
+              "frame_index": 129
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                439,
+                755,
+                500
+              ],
+              "frame_index": 130
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                438,
+                755,
+                500
+              ],
+              "frame_index": 131
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                438,
+                755,
+                500
+              ],
+              "frame_index": 132
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                438,
+                755,
+                500
+              ],
+              "frame_index": 133
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                438,
+                755,
+                500
+              ],
+              "frame_index": 134
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                438,
+                755,
+                500
+              ],
+              "frame_index": 135
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                438,
+                755,
+                500
+              ],
+              "frame_index": 136
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                438,
+                755,
+                500
+              ],
+              "frame_index": 137
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                438,
+                754,
+                500
+              ],
+              "frame_index": 138
+            },
+            {
+              "bbox_xyxy": [
+                729,
+                438,
+                754,
+                500
+              ],
+              "frame_index": 139
+            },
+            {
+              "bbox_xyxy": [
+                729,
+                437,
+                754,
+                500
+              ],
+              "frame_index": 140
+            },
+            {
+              "bbox_xyxy": [
+                729,
+                437,
+                754,
+                500
+              ],
+              "frame_index": 141
+            },
+            {
+              "bbox_xyxy": [
+                729,
+                436,
+                753,
+                500
+              ],
+              "frame_index": 142
+            },
+            {
+              "bbox_xyxy": [
+                729,
+                435,
+                753,
+                500
+              ],
+              "frame_index": 143
+            },
+            {
+              "bbox_xyxy": [
+                729,
+                434,
+                753,
+                500
+              ],
+              "frame_index": 144
+            },
+            {
+              "bbox_xyxy": [
+                729,
+                433,
+                753,
+                500
+              ],
+              "frame_index": 145
+            },
+            {
+              "bbox_xyxy": [
+                729,
+                433,
+                753,
+                500
+              ],
+              "frame_index": 146
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                432,
+                754,
+                500
+              ],
+              "frame_index": 147
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                432,
+                754,
+                500
+              ],
+              "frame_index": 148
+            },
+            {
+              "bbox_xyxy": [
+                730,
+                431,
+                754,
+                500
+              ],
+              "frame_index": 149
+            }
+          ],
+          "target_id": "p-004",
+          "upstream_source_ids": [
+            35
+          ]
+        },
+        {
+          "bootstrap": "Upstream geometry is pixel-stable over frames 32-84; the unchanged physical vehicle and constant box were visually verified on every earlier and later frame.",
+          "class_id": "vehicle",
+          "constant_box_ranges": [
+            {
+              "bbox_xyxy": [
+                611.333,
+                333.2,
+                687.867,
+                366.8
+              ],
+              "frame_indexes": [
+                0,
+                31
+              ]
+            },
+            {
+              "bbox_xyxy": [
+                611.333,
+                333.2,
+                687.867,
+                366.8
+              ],
+              "frame_indexes": [
+                85,
+                149
+              ]
+            }
+          ],
+          "reason": "MEVA activity geometry covers output frames 32-84 although the same visible vehicle remains in the scene for the complete 0-149 window.",
+          "target_id": "v-003",
+          "upstream_source_ids": [
+            95
+          ]
+        }
+      ],
+      "omitted_supported_movers": [],
+      "status": "corrected-and-complete"
+    }
+  },
+  "dataset": "MEVA KF1",
+  "frame_manifest_sha256": "636a3f0224d15a9c4b62ccca79266922364343226b93bd38a1e630777a8de0a9",
+  "schema_version": "cvbench.real-video-visual-audit/v1"
+}

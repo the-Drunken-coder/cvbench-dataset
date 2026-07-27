@@ -1,0 +1,469 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+import tarfile
+import zipfile
+from pathlib import Path
+
+import pytest
+import yaml
+
+from cvbench_dataset import (
+    DatasetError,
+    build_release,
+    import_contribution,
+    init_dataset,
+    validate_dataset,
+    verify_release,
+)
+from cvbench_dataset.cli import main
+
+ROOT = Path(__file__).parents[1]
+SAMPLE = ROOT / "examples" / "minimal-certified"
+
+
+def _copy_sample(tmp_path: Path) -> Path:
+    destination = tmp_path / "dataset"
+    shutil.copytree(SAMPLE, destination)
+    (destination / "release-manifest.json").unlink(missing_ok=True)
+    return destination
+
+
+def _draft_destination(tmp_path: Path) -> Path:
+    dataset = _copy_sample(tmp_path)
+    descriptor = yaml.safe_load((dataset / "dataset.yaml").read_text())
+    descriptor["state"] = "draft"
+    descriptor["evaluation_eligible"] = False
+    descriptor["certification"].pop("certified_at")
+    (dataset / "dataset.yaml").write_text(yaml.safe_dump(descriptor, sort_keys=False))
+    return dataset
+
+
+def _studio_zip(tmp_path: Path, *, review_body: bytes = b"", unsafe_name: str | None = None) -> Path:
+    clip_id = "imported-clip"
+    clip_path = f"clips/{clip_id}"
+    sample_clip = SAMPLE / "clips" / "synthetic-clip"
+    tracks = [
+        {**json.loads(line), "clip_id": clip_id}
+        for line in (sample_clip / "tracks.jsonl").read_text().splitlines()
+    ]
+    source = json.loads((sample_clip / "source.json").read_text())
+    source["clip_id"] = clip_id
+    source["source"]["uri"] = f"synthetic://cvbench/studio/{clip_id}"
+    contribution = {
+        "schema_version": "cvbench.studio-contribution/v1",
+        "clip_id": clip_id,
+        "clip_path": clip_path,
+        "license_path": "licenses/MIT.txt",
+    }
+    path = tmp_path / "contribution.zip"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("contribution.json", json.dumps(contribution))
+        archive.writestr(f"{clip_path}/video.mp4", (sample_clip / "video.mp4").read_bytes())
+        archive.writestr(
+            f"{clip_path}/tracks.jsonl",
+            "".join(json.dumps(row, sort_keys=True) + "\n" for row in tracks),
+        )
+        archive.writestr(f"{clip_path}/source.json", json.dumps(source, indent=2, sort_keys=True) + "\n")
+        archive.writestr(f"{clip_path}/review.jsonl", review_body)
+        archive.writestr("licenses/MIT.txt", (SAMPLE / "licenses" / "MIT.txt").read_bytes())
+        if unsafe_name:
+            archive.writestr(unsafe_name, b"unsafe")
+    return path
+
+
+def _write_json(path: Path, value: dict) -> None:
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def test_init_creates_a_valid_empty_draft(tmp_path: Path) -> None:
+    root = tmp_path / "new-dataset"
+    result = init_dataset(
+        root,
+        dataset_id="new-sports-dataset",
+        title="New sports dataset",
+        description="A contributor-owned draft.",
+        classes=["person=Visible participant", "ball=Visible game ball"],
+    )
+    assert result["state"] == "draft"
+    assert result["data_role"] == "training_only"
+    assert result["annotation_scope"] == "exhaustive_visible"
+    assert result["evaluation_eligible"] is False
+    assert result["clips"] == []
+    assert {path.name for path in root.iterdir()} == {
+        "clips",
+        "dataset.yaml",
+        "licenses",
+        "schemas",
+    }
+    assert validate_dataset(root).to_dict() == result
+
+
+def test_init_cli_creates_a_studio_ready_draft(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    root = tmp_path / "cli-dataset"
+    exit_code = main(
+        [
+            "init",
+            str(root),
+            "--id",
+            "cli-sports-dataset",
+            "--title",
+            "CLI sports dataset",
+            "--description",
+            "Created without copying a fixture.",
+            "--class",
+            "person=Visible participant",
+            "--class",
+            "ball=Visible game ball",
+            "--data-role",
+            "benchmark_candidate",
+            "--annotation-scope",
+            "class_exhaustive",
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["data_role"] == "benchmark_candidate"
+    assert output["annotation_scope"] == "class_exhaustive"
+    assert output["evaluation_eligible"] is False
+    assert validate_dataset(root).state == "draft"
+
+
+def test_init_never_promotes_declared_truth_to_evaluation_eligible(tmp_path: Path) -> None:
+    root = tmp_path / "truth-draft"
+    result = init_dataset(
+        root,
+        dataset_id="truth-draft",
+        title="Truth candidate",
+        description="Still requires review and certification.",
+        classes=["person=Visible participant"],
+        data_role="benchmark_truth",
+        annotation_scope="exhaustive_visible",
+    )
+    assert result["state"] == "draft"
+    assert result["evaluation_eligible"] is False
+
+
+@pytest.mark.parametrize("existing_kind", ["directory", "file"])
+def test_init_refuses_any_existing_target(tmp_path: Path, existing_kind: str) -> None:
+    root = tmp_path / "already-here"
+    if existing_kind == "directory":
+        root.mkdir()
+    else:
+        root.write_text("preserve me\n")
+    with pytest.raises(DatasetError, match="already exists"):
+        init_dataset(
+            root,
+            dataset_id="new-sports-dataset",
+            title="New sports dataset",
+            description="A contributor-owned draft.",
+            classes=["person=Visible participant"],
+        )
+    assert root.exists()
+
+
+@pytest.mark.parametrize("classes", [[], ["missing-separator"], ["person=one", "person=two"]])
+def test_init_rejects_invalid_class_arguments_without_creating_target(
+    tmp_path: Path,
+    classes: list[str],
+) -> None:
+    root = tmp_path / "invalid"
+    with pytest.raises(DatasetError):
+        init_dataset(
+            root,
+            dataset_id="new-sports-dataset",
+            title="New sports dataset",
+            description="A contributor-owned draft.",
+            classes=classes,
+        )
+    assert not root.exists()
+
+
+def _rewrite_reviews(dataset: Path, reviewers: tuple[str, ...] = ("reviewer-a", "reviewer-b")) -> None:
+    clip = dataset / "clips" / "synthetic-clip"
+    hashes = {
+        "video_sha256": hashlib.sha256((clip / "video.mp4").read_bytes()).hexdigest(),
+        "tracks_sha256": hashlib.sha256((clip / "tracks.jsonl").read_bytes()).hexdigest(),
+        "source_sha256": hashlib.sha256((clip / "source.json").read_bytes()).hexdigest(),
+    }
+    rows = [
+        {
+            "artifacts": hashes,
+            "clip_id": "synthetic-clip",
+            "decision": "approve",
+            "rationale": "Independent complete fixture review.",
+            "review_id": f"review-{index}",
+            "reviewed_at": f"2026-07-27T0{index}:00:00Z",
+            "reviewer": {"id": reviewer, "independent": True, "kind": "human"},
+            "schema_version": "cvbench.review/v1",
+            "scope": "all_annotations",
+        }
+        for index, reviewer in enumerate(reviewers, start=1)
+    ]
+    (clip / "review.jsonl").write_text(
+        "".join(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n" for row in rows)
+    )
+
+
+def test_committed_certified_fixture_validates_and_exposes_origin_counts() -> None:
+    report = validate_dataset(SAMPLE)
+    assert report.id == "minimal-synthetic"
+    assert report.state == "certified"
+    assert report.data_role == "benchmark_truth"
+    assert report.annotation_scope == "exhaustive_visible"
+    assert report.evaluation_eligible is True
+    assert report.annotation_rows == 2
+    assert report.annotation_origins == {"human": 2}
+    assert report.clips[0].approved_reviewers == ["example-reviewer-a", "example-reviewer-b"]
+
+
+def test_release_build_is_byte_deterministic_and_verifiable(tmp_path: Path) -> None:
+    dataset = _copy_sample(tmp_path)
+    first = tmp_path / "first.tar.gz"
+    second = tmp_path / "second.tar.gz"
+    first_result = build_release(dataset, first)
+    second_result = build_release(dataset, second)
+    assert first.read_bytes() == second.read_bytes()
+    assert first_result["archive_sha256"] == second_result["archive_sha256"]
+    verified = verify_release(dataset, first)
+    assert verified["archive_sha256"] == first_result["archive_sha256"]
+    assert verified["files"] == 13
+    with tarfile.open(first, "r:gz") as archive:
+        members = archive.getmembers()
+    assert [member.name for member in members] == sorted(member.name for member in members)
+    assert all(
+        member.name == "minimal-synthetic-1.0.0"
+        or member.name.startswith("minimal-synthetic-1.0.0/")
+        for member in members
+    )
+    assert all(member.uid == member.gid == member.mtime == 0 for member in members)
+    assert all(not member.issym() and not member.islnk() for member in members)
+
+
+def test_release_processing_never_reads_video_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dataset = _copy_sample(tmp_path)
+    archive = tmp_path / "streamed.tar.gz"
+    original_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(path: Path) -> bytes:
+        if path.name == "video.mp4":
+            raise AssertionError("video.mp4 must be streamed")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    build_release(dataset, archive)
+    verify_release(dataset, archive)
+
+
+def test_build_release_fails_closed_for_noncertified_state(tmp_path: Path) -> None:
+    dataset = _copy_sample(tmp_path)
+    descriptor = yaml.safe_load((dataset / "dataset.yaml").read_text())
+    descriptor["state"] = "reviewed"
+    descriptor["evaluation_eligible"] = False
+    descriptor["certification"].pop("certified_at")
+    (dataset / "dataset.yaml").write_text(yaml.safe_dump(descriptor, sort_keys=False))
+    with pytest.raises(DatasetError, match="only certified|requires dataset state certified"):
+        build_release(dataset, tmp_path / "release.tar.gz")
+
+
+def test_certified_validation_requires_release_manifest(tmp_path: Path) -> None:
+    dataset = _copy_sample(tmp_path)
+    with pytest.raises(DatasetError, match="require release-manifest"):
+        validate_dataset(dataset)
+
+
+def test_clips_root_rejects_undeclared_files(tmp_path: Path) -> None:
+    dataset = _copy_sample(tmp_path)
+    (dataset / "clips" / "notes.txt").write_text("not canonical\n")
+    with pytest.raises(DatasetError, match="clip directories do not match"):
+        validate_dataset(dataset, require_manifest=False)
+
+
+@pytest.mark.parametrize(
+    ("state", "data_role", "annotation_scope"),
+    [
+        ("certified", "training_only", "exhaustive_visible"),
+        ("certified", "benchmark_candidate", "exhaustive_visible"),
+        ("certified", "benchmark_truth", "class_exhaustive"),
+        ("certified", "benchmark_truth", "sparse"),
+        ("certified", "benchmark_truth", "activity_bounded"),
+        ("draft", "benchmark_truth", "exhaustive_visible"),
+    ],
+)
+def test_evaluation_eligibility_is_fail_closed(
+    tmp_path: Path,
+    state: str,
+    data_role: str,
+    annotation_scope: str,
+) -> None:
+    dataset = _copy_sample(tmp_path)
+    descriptor = yaml.safe_load((dataset / "dataset.yaml").read_text())
+    descriptor["state"] = state
+    descriptor["data_role"] = data_role
+    descriptor["annotation_scope"] = annotation_scope
+    descriptor["evaluation_eligible"] = True
+    if state != "certified":
+        descriptor["certification"].pop("certified_at")
+    (dataset / "dataset.yaml").write_text(yaml.safe_dump(descriptor, sort_keys=False))
+    with pytest.raises(DatasetError):
+        validate_dataset(dataset, require_manifest=False)
+
+
+def test_artifact_change_makes_reviews_stale(tmp_path: Path) -> None:
+    dataset = _copy_sample(tmp_path)
+    tracks = dataset / "clips" / "synthetic-clip" / "tracks.jsonl"
+    tracks.write_text(tracks.read_text().replace("[4,2,11,13]", "[5,2,12,13]"))
+    with pytest.raises(DatasetError, match="found 0"):
+        validate_dataset(dataset, require_manifest=False)
+
+
+def test_model_generated_labels_require_declared_model_run(tmp_path: Path) -> None:
+    dataset = _copy_sample(tmp_path)
+    tracks = dataset / "clips" / "synthetic-clip" / "tracks.jsonl"
+    rows = [json.loads(line) for line in tracks.read_text().splitlines()]
+    for row in rows:
+        row["label_origin"] = {"kind": "model_generated", "model_run_ids": ["scan-1"]}
+    tracks.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    with pytest.raises(DatasetError, match="unknown model_run_ids"):
+        validate_dataset(dataset, require_manifest=False)
+
+
+def test_model_generated_labels_are_visible_in_release_manifest(tmp_path: Path) -> None:
+    dataset = _copy_sample(tmp_path)
+    clip = dataset / "clips" / "synthetic-clip"
+    tracks = clip / "tracks.jsonl"
+    rows = [json.loads(line) for line in tracks.read_text().splitlines()]
+    for row in rows:
+        row["label_origin"] = {"kind": "model_generated", "model_run_ids": ["scan-1"]}
+    tracks.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+
+    source_path = clip / "source.json"
+    source = json.loads(source_path.read_text())
+    source["model_runs"] = [
+        {
+            "code_revision": "0123456789abcdef",
+            "command": ["scanner", "--config", "config.json"],
+            "config_sha256": "1" * 64,
+            "license": {"spdx": "Apache-2.0", "url": "https://www.apache.org/licenses/LICENSE-2.0"},
+            "model_name": "fixture-detector",
+            "model_version": "1.0.0",
+            "raw_output_sha256": "2" * 64,
+            "run_id": "scan-1",
+            "weights_sha256": "3" * 64,
+            "weights_uri": "https://example.invalid/fixture-detector.bin",
+        }
+    ]
+    _write_json(source_path, source)
+    _rewrite_reviews(dataset)
+
+    build_release(dataset, tmp_path / "model-release.tar.gz")
+    manifest = json.loads((dataset / "release-manifest.json").read_text())
+    assert manifest["clips"][0]["annotation_origins"] == {"model_generated": 2}
+
+
+def test_current_rejection_blocks_reviewed_or_certified_state(tmp_path: Path) -> None:
+    dataset = _copy_sample(tmp_path)
+    review_path = dataset / "clips" / "synthetic-clip" / "review.jsonl"
+    rows = [json.loads(line) for line in review_path.read_text().splitlines()]
+    rows[0]["decision"] = "reject"
+    review_path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    with pytest.raises(DatasetError, match="current review rejects"):
+        validate_dataset(dataset, require_manifest=False)
+
+
+def test_unresolved_lfs_pointer_is_rejected(tmp_path: Path) -> None:
+    dataset = _copy_sample(tmp_path)
+    video = dataset / "clips" / "synthetic-clip" / "video.mp4"
+    video.write_text(
+        "version https://git-lfs.github.com/spec/v1\n"
+        "oid sha256:" + "0" * 64 + "\n"
+        "size 1108\n"
+    )
+    with pytest.raises(DatasetError, match="Git LFS pointer"):
+        validate_dataset(dataset, require_manifest=False)
+
+
+def test_archive_tampering_is_rejected(tmp_path: Path) -> None:
+    dataset = _copy_sample(tmp_path)
+    archive = tmp_path / "release.tar.gz"
+    build_release(dataset, archive)
+    archive.write_bytes(archive.read_bytes() + b"tamper")
+    with pytest.raises(DatasetError, match="not the canonical deterministic archive"):
+        verify_release(dataset, archive)
+
+
+def test_release_output_cannot_be_inside_dataset_root(tmp_path: Path) -> None:
+    dataset = _copy_sample(tmp_path)
+    with pytest.raises(DatasetError, match="outside the dataset root"):
+        build_release(dataset, dataset / "release.tar.gz")
+
+
+def test_symlink_is_rejected(tmp_path: Path) -> None:
+    dataset = _copy_sample(tmp_path)
+    link = dataset / "licenses" / "linked.txt"
+    try:
+        link.symlink_to(dataset / "licenses" / "MIT.txt")
+    except OSError:
+        pytest.skip("symlinks are unavailable on this platform")
+    with pytest.raises(DatasetError, match="cannot contain symlinks"):
+        validate_dataset(dataset, require_manifest=False)
+
+
+def test_studio_contribution_imports_one_validated_clip_into_draft(tmp_path: Path) -> None:
+    dataset = _draft_destination(tmp_path)
+    contribution = _studio_zip(tmp_path)
+    result = import_contribution(dataset, contribution)
+    assert result == {
+        "annotation_origins": {"human": 2},
+        "annotation_rows": 2,
+        "clip_path": "clips/imported-clip",
+        "dataset": {
+            "annotation_scope": "exhaustive_visible",
+            "data_role": "benchmark_truth",
+            "evaluation_eligible": False,
+            "id": "minimal-synthetic",
+            "state": "draft",
+            "version": "1.0.0",
+        },
+        "imported_clip": "imported-clip",
+        "license_path": "licenses/MIT.txt",
+    }
+    report = validate_dataset(dataset)
+    assert [clip.id for clip in report.clips] == ["imported-clip", "synthetic-clip"]
+    assert (dataset / "clips" / "imported-clip" / "review.jsonl").read_bytes() == b""
+
+
+def test_studio_contribution_refuses_duplicate_clip(tmp_path: Path) -> None:
+    dataset = _draft_destination(tmp_path)
+    contribution = _studio_zip(tmp_path)
+    import_contribution(dataset, contribution)
+    with pytest.raises(DatasetError, match="already declares"):
+        import_contribution(dataset, contribution)
+
+
+def test_studio_contribution_refuses_non_draft_destination(tmp_path: Path) -> None:
+    dataset = tmp_path / "certified"
+    shutil.copytree(SAMPLE, dataset)
+    contribution = _studio_zip(tmp_path)
+    with pytest.raises(DatasetError, match="only be imported into a draft"):
+        import_contribution(dataset, contribution)
+
+
+def test_studio_contribution_rejects_unsafe_zip_without_mutation(tmp_path: Path) -> None:
+    dataset = _draft_destination(tmp_path)
+    descriptor_before = (dataset / "dataset.yaml").read_bytes()
+    contribution = _studio_zip(tmp_path, unsafe_name="../escape")
+    with pytest.raises(DatasetError, match="unsafe ZIP path"):
+        import_contribution(dataset, contribution)
+    assert (dataset / "dataset.yaml").read_bytes() == descriptor_before
+    assert not (dataset / "clips" / "imported-clip").exists()
+
+
+def test_studio_contribution_cannot_inject_review_approvals(tmp_path: Path) -> None:
+    dataset = _draft_destination(tmp_path)
+    contribution = _studio_zip(tmp_path, review_body=b"{}\n")
+    with pytest.raises(DatasetError, match="empty draft review"):
+        import_contribution(dataset, contribution)
+    assert not (dataset / "clips" / "imported-clip").exists()

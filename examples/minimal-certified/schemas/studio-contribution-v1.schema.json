@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cvbench.dev/schemas/studio-contribution-v1.schema.json",
+  "title": "CVBench Studio contribution",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "clip_id", "clip_path", "license_path"],
+  "properties": {
+    "schema_version": {"const": "cvbench.studio-contribution/v1"},
+    "clip_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"},
+    "clip_path": {"type": "string", "pattern": "^clips/[a-z0-9][a-z0-9-]{1,63}$"},
+    "license_path": {"type": "string", "pattern": "^licenses/[A-Za-z0-9._-]+$"}
+  }
+}

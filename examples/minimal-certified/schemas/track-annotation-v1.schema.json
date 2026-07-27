@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cvbench.dev/schemas/track-annotation-v1.schema.json",
+  "title": "CVBench track annotation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "clip_id",
+    "frame_index",
+    "source_timestamp_ns",
+    "track_id",
+    "class_id",
+    "bbox_xyxy",
+    "label_origin"
+  ],
+  "properties": {
+    "schema_version": {"const": "cvbench.track-annotation/v1"},
+    "clip_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"},
+    "frame_index": {"type": "integer", "minimum": 0},
+    "source_timestamp_ns": {"type": "integer", "minimum": 0},
+    "track_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$"},
+    "class_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+    "bbox_xyxy": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {"type": "number"}
+    },
+    "occlusion": {"enum": ["none", "partial", "heavy", "unknown"]},
+    "truncated": {"type": "boolean"},
+    "label_origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "model_run_ids"],
+      "properties": {
+        "kind": {"enum": ["human", "upstream", "model_assisted", "model_generated"]},
+        "model_run_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$"}
+        }
+      }
+    }
+  }
+}

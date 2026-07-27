@@ -1,0 +1,20 @@
+schema_version: cvbench.dataset/v1
+id: minimal-synthetic
+version: 1.0.0
+title: Minimal synthetic certification fixture
+description: Two tiny synthetic frames used only to exercise the package and release contract.
+state: certified
+data_role: benchmark_truth
+annotation_scope: exhaustive_visible
+evaluation_eligible: true
+ontology:
+  classes:
+    - id: person
+      description: Synthetic person-shaped target.
+clips:
+  - id: synthetic-clip
+    path: clips/synthetic-clip
+certification:
+  policy: cvbench.dataset-certification/v1
+  required_independent_approvals: 2
+  certified_at: "2026-07-27T00:00:00Z"

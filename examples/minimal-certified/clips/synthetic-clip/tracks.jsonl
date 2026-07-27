@@ -1,0 +1,2 @@
+{"bbox_xyxy":[2,2,9,13],"class_id":"person","clip_id":"synthetic-clip","frame_index":0,"label_origin":{"kind":"human","model_run_ids":[]},"occlusion":"none","schema_version":"cvbench.track-annotation/v1","source_timestamp_ns":0,"track_id":"person-001","truncated":false}
+{"bbox_xyxy":[4,2,11,13],"class_id":"person","clip_id":"synthetic-clip","frame_index":1,"label_origin":{"kind":"human","model_run_ids":[]},"occlusion":"none","schema_version":"cvbench.track-annotation/v1","source_timestamp_ns":500000000,"track_id":"person-001","truncated":false}

@@ -1,0 +1,24 @@
+{
+  "clip_id": "synthetic-clip",
+  "media": {
+    "fps_denominator": 1,
+    "fps_numerator": 2,
+    "frame_count": 2,
+    "height": 16,
+    "width": 16
+  },
+  "model_runs": [],
+  "schema_version": "cvbench.source/v1",
+  "source": {
+    "license": {
+      "file": "licenses/MIT.txt",
+      "name": "MIT License",
+      "spdx": "MIT",
+      "url": "https://opensource.org/license/mit"
+    },
+    "sha256": "c958b1b95a673db11c1a162701d8b997bdcc5b723408cd669659e07f1ba1a898",
+    "title": "Programmatically generated 16 by 16 fixture",
+    "uri": "synthetic://cvbench/minimal-certified/synthetic-clip"
+  },
+  "transformations": []
+}
