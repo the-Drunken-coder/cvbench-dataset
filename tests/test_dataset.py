@@ -304,6 +304,30 @@ def test_hydration_rechecks_copied_source_bytes(tmp_path: Path, monkeypatch: pyt
     assert not output.exists()
 
 
+def test_hydration_revalidates_copied_recipe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    clips = recipe / "clips"
+    tracks = clips / "synthetic-clip" / "tracks.jsonl"
+    copytree_original = source_recipe_module.shutil.copytree
+
+    def mutate_recipe_then_copy(source: Path, destination: Path, *args, **kwargs):
+        if Path(source) == clips:
+            rows = [json.loads(line) for line in tracks.read_text().splitlines()]
+            rows[0]["label_origin"] = {"kind": "human", "model_run_ids": []}
+            tracks.write_text(
+                "".join(
+                    json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n" for row in rows
+                )
+            )
+        return copytree_original(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(source_recipe_module.shutil, "copytree", mutate_recipe_then_copy)
+    output = tmp_path / "hydrated"
+    with pytest.raises(DatasetError, match="model-derived"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
+
+
 def test_canonical_validation_rejects_config_artifact_drift(tmp_path: Path) -> None:
     recipe, source_dir = _source_recipe(tmp_path)
     output = tmp_path / "hydrated"
@@ -311,6 +335,27 @@ def test_canonical_validation_rejects_config_artifact_drift(tmp_path: Path) -> N
     (output / "artifacts" / "synthetic-model-config.json").write_text('{"offline":false}\n')
     with pytest.raises(DatasetError, match="config_file SHA-256"):
         validate_dataset(output)
+
+
+def test_canonical_validation_rejects_unreferenced_config_artifact(tmp_path: Path) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    output = tmp_path / "hydrated"
+    hydrate_source_recipe(recipe, source_dir, output)
+    (output / "artifacts" / "orphan.json").write_text("{}\n")
+    with pytest.raises(DatasetError, match="config artifacts mismatch"):
+        validate_dataset(output)
+
+
+def test_source_recipe_rejects_non_finite_confidence(tmp_path: Path) -> None:
+    recipe, _ = _source_recipe(tmp_path)
+    tracks = recipe / "clips" / "synthetic-clip" / "tracks.jsonl"
+    rows = [json.loads(line) for line in tracks.read_text().splitlines()]
+    rows[0]["confidence"] = float("nan")
+    tracks.write_text(
+        "".join(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n" for row in rows)
+    )
+    with pytest.raises(DatasetError, match="confidence must be finite"):
+        validate_source_recipe(recipe)
 
 
 def test_source_recipe_rejects_non_model_labels(tmp_path: Path) -> None:

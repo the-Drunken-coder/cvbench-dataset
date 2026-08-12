@@ -269,14 +269,27 @@ def hydrate_source_recipe(
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}-", dir=output.parent))
     try:
-        for name in ("artifacts", "dataset.yaml", "licenses", "schemas", "clips"):
+        for name in (
+            "README.md",
+            "artifacts",
+            "dataset.yaml",
+            "licenses",
+            "schemas",
+            "clips",
+            "source-lock.json",
+        ):
             source = root / name
             destination = temporary / name
             if source.is_dir():
                 shutil.copytree(source, destination)
             else:
                 shutil.copy2(source, destination)
-        for clip in report.clips:
+        copied_report = validate_source_recipe(temporary)
+        if copied_report != report:
+            raise DatasetError("source recipe changed during hydration")
+        (temporary / "README.md").unlink()
+        (temporary / "source-lock.json").unlink()
+        for clip in copied_report.clips:
             copied_video = temporary / "clips" / clip.id / "video.mp4"
             shutil.copyfile(source_dir / clip.source_filename, copied_video)
             if sha256_file(copied_video) != clip.source_sha256:

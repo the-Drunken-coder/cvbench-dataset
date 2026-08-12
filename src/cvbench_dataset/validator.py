@@ -214,6 +214,10 @@ def _validate_tracks(
         if not (0 <= box[0] < box[2] <= media["width"] and 0 <= box[1] < box[3] <= media["height"]):
             raise DatasetError(f"{context}: bbox_xyxy lies outside the declared media dimensions")
 
+        confidence = row.get("confidence")
+        if confidence is not None and not math.isfinite(confidence):
+            raise DatasetError(f"{context}: confidence must be finite")
+
         origin = row["label_origin"]
         referenced_runs = set(origin["model_run_ids"])
         if origin["kind"] in MODEL_ORIGINS:
@@ -371,6 +375,30 @@ def validate_dataset(root: str | Path, *, require_manifest: bool = True) -> Data
         )
         for clip in descriptor["clips"]
     ]
+    referenced_configs = {
+        value["config_file"]
+        for clip in descriptor["clips"]
+        for value in [
+            *_load_json(root / clip["path"] / "source.json")["transformations"],
+            *_load_json(root / clip["path"] / "source.json")["model_runs"],
+        ]
+        if "config_file" in value
+    }
+    artifact_root = root / "artifacts"
+    actual_configs = (
+        {
+            path.relative_to(root).as_posix()
+            for path in artifact_root.rglob("*")
+            if path.is_file()
+        }
+        if artifact_root.is_dir()
+        else set()
+    )
+    if actual_configs != referenced_configs:
+        raise DatasetError(
+            "dataset config artifacts mismatch: "
+            f"referenced {sorted(referenced_configs)}, found {sorted(actual_configs)}"
+        )
     origins: Counter[str] = Counter()
     for clip in clips:
         origins.update(clip.annotation_origins)
