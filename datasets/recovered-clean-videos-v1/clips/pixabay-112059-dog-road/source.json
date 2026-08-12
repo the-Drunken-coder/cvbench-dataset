@@ -19,7 +19,8 @@
         "--confidence-threshold",
         "0.25"
       ],
-      "config_sha256": "bf34b59451e372050fbfcd906484742fd6e66595d4a8977bac7003f2dd114601",
+      "config_file": "artifacts/recovered-training-config.json",
+      "config_sha256": "ab1411538a316e5286777104ee2af260ef3cf8cd339c32491a1e3c2e5ba2ac09",
       "license": {
         "spdx": "Apache-2.0",
         "url": "https://github.com/Megvii-BaseDetection/YOLOX/blob/main/LICENSE"
@@ -46,7 +47,8 @@
   },
   "transformations": [
     {
-      "config_sha256": "bf34b59451e372050fbfcd906484742fd6e66595d4a8977bac7003f2dd114601",
+      "config_file": "artifacts/recovered-training-config.json",
+      "config_sha256": "ab1411538a316e5286777104ee2af260ef3cf8cd339c32491a1e3c2e5ba2ac09",
       "description": "Sampled source frames at 5 FPS for non-exhaustive model proposals. Media bytes are unchanged.",
       "kind": "annotation_sampling",
       "tool": "cvbench.recovered_training at c3c32f728482ad8d3ad6da2fcb0439992d9f19d5"

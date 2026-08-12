@@ -32,6 +32,8 @@ def _role(path: str) -> str:
         return "license"
     if path.startswith("schemas/"):
         return "schema"
+    if path.startswith("artifacts/"):
+        return "provenance"
     if path.endswith("/video.mp4"):
         return "media"
     if path.endswith("/tracks.jsonl"):

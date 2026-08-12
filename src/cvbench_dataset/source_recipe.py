@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import shutil
 import tempfile
 from dataclasses import asdict, dataclass
@@ -21,7 +20,15 @@ from .validator import (
 )
 
 RECIPE_CLIP_FILENAMES = {"review.jsonl", "source.json", "tracks.jsonl"}
-RECIPE_TOP_LEVEL_NAMES = {"README.md", "clips", "dataset.yaml", "licenses", "schemas", "source-lock.json"}
+RECIPE_TOP_LEVEL_NAMES = {
+    "README.md",
+    "artifacts",
+    "clips",
+    "dataset.yaml",
+    "licenses",
+    "schemas",
+    "source-lock.json",
+}
 
 
 @dataclass(frozen=True)
@@ -87,6 +94,22 @@ def _assert_recipe_layout(root: Path, declared_clips: list[dict[str, Any]]) -> N
             raise DatasetError(f"{expected_path} contains a non-file canonical artifact")
 
 
+def _validate_config_artifact(root: Path, value: dict[str, Any], context: str) -> str:
+    relative = value.get("config_file")
+    if not isinstance(relative, str):
+        raise DatasetError(f"{context}: config_sha256 requires config_file")
+    path = root / relative
+    try:
+        path.resolve().relative_to((root / "artifacts").resolve())
+    except ValueError as exc:
+        raise DatasetError(f"{context}: config_file escapes artifacts/") from exc
+    if path.is_symlink() or not path.is_file():
+        raise DatasetError(f"{context}: declared config_file is missing")
+    if sha256_file(path) != value["config_sha256"]:
+        raise DatasetError(f"{context}: config_file SHA-256 does not match config_sha256")
+    return relative
+
+
 def validate_source_recipe(root: str | Path) -> SourceRecipeReport:
     root = Path(root).resolve()
     _assert_safe_tree(root)
@@ -116,7 +139,29 @@ def validate_source_recipe(root: str | Path) -> SourceRecipeReport:
     if len(lock_by_id) != len(locked_clips) or set(lock_by_id) != set(clip_ids):
         raise DatasetError("source-lock.json clip IDs must match dataset.yaml exactly")
 
+    hashes_by_filename: dict[str, str] = {}
+    for item in locked_clips:
+        clip_id = item["id"]
+        filename = item["filename"]
+        sha256 = item["sha256"]
+        if (
+            not isinstance(filename, str)
+            or Path(filename).name != filename
+            or not filename.lower().endswith(".mp4")
+        ):
+            raise DatasetError(f"source-lock.json has an unsafe filename for {clip_id}")
+        if (
+            not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+        ):
+            raise DatasetError(f"source-lock.json has an invalid SHA-256 for {clip_id}")
+        previous = hashes_by_filename.setdefault(filename, sha256)
+        if previous != sha256:
+            raise DatasetError(f"source-lock.json assigns conflicting SHA-256 values to {filename}")
+
     reports: list[SourceRecipeClipReport] = []
+    referenced_configs: set[str] = set()
     for clip in descriptor["clips"]:
         clip_id = clip["id"]
         clip_root = root / clip["path"]
@@ -127,19 +172,24 @@ def validate_source_recipe(root: str | Path) -> SourceRecipeReport:
         run_ids = [run["run_id"] for run in source["model_runs"]]
         if len(run_ids) != len(set(run_ids)):
             raise DatasetError(f"{clip_root / 'source.json'}: duplicate model run IDs")
+        for index, transformation in enumerate(source["transformations"]):
+            if "config_sha256" in transformation:
+                referenced_configs.add(
+                    _validate_config_artifact(
+                        root,
+                        transformation,
+                        f"{clip_root / 'source.json'} transformation {index}",
+                    )
+                )
+        for run in source["model_runs"]:
+            referenced_configs.add(
+                _validate_config_artifact(
+                    root,
+                    run,
+                    f"{clip_root / 'source.json'} model run {run['run_id']}",
+                )
+            )
         lock = lock_by_id[clip_id]
-        if (
-            not isinstance(lock["filename"], str)
-            or Path(lock["filename"]).name != lock["filename"]
-            or not lock["filename"].lower().endswith(".mp4")
-        ):
-            raise DatasetError(f"source-lock.json has an unsafe filename for {clip_id}")
-        if (
-            not isinstance(lock["sha256"], str)
-            or len(lock["sha256"]) != 64
-            or any(character not in "0123456789abcdef" for character in lock["sha256"])
-        ):
-            raise DatasetError(f"source-lock.json has an invalid SHA-256 for {clip_id}")
         if source["source"]["sha256"] != lock["sha256"]:
             raise DatasetError(f"source-lock.json hash does not match source.json for {clip_id}")
         license_path = root / source["source"]["license"]["file"]
@@ -167,6 +217,16 @@ def validate_source_recipe(root: str | Path) -> SourceRecipeReport:
                 annotation_rows=annotation_rows,
                 annotation_origins=dict(sorted(origins.items())),
             )
+        )
+    actual_configs = {
+        path.relative_to(root).as_posix()
+        for path in (root / "artifacts").rglob("*")
+        if path.is_file()
+    }
+    if actual_configs != referenced_configs:
+        raise DatasetError(
+            f"source recipe config artifacts mismatch: expected {sorted(referenced_configs)}, "
+            f"found {sorted(actual_configs)}"
         )
     return SourceRecipeReport(
         id=descriptor["id"],
@@ -209,7 +269,7 @@ def hydrate_source_recipe(
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}-", dir=output.parent))
     try:
-        for name in ("dataset.yaml", "licenses", "schemas", "clips"):
+        for name in ("artifacts", "dataset.yaml", "licenses", "schemas", "clips"):
             source = root / name
             destination = temporary / name
             if source.is_dir():
@@ -219,7 +279,17 @@ def hydrate_source_recipe(
         for clip in report.clips:
             shutil.copyfile(source_dir / clip.source_filename, temporary / "clips" / clip.id / "video.mp4")
         hydrated = validate_dataset(temporary).to_dict()
-        os.replace(temporary, output)
+        try:
+            output.mkdir()
+        except FileExistsError as exc:
+            raise DatasetError(f"hydrate target already exists: {output}") from exc
+        try:
+            for path in temporary.iterdir():
+                path.replace(output / path.name)
+            temporary.rmdir()
+        except BaseException:
+            shutil.rmtree(output, ignore_errors=True)
+            raise
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise

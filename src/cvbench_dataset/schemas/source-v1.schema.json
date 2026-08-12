@@ -58,7 +58,12 @@
           "kind": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
           "description": {"type": "string", "minLength": 1, "maxLength": 2000},
           "tool": {"type": "string", "minLength": 1, "maxLength": 500},
-          "config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          "config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "config_file": {"type": "string", "pattern": "^artifacts/[A-Za-z0-9._/-]+\\.json$"}
+        },
+        "dependentRequired": {
+          "config_sha256": ["config_file"],
+          "config_file": ["config_sha256"]
         }
       }
     },
@@ -87,6 +92,7 @@
           "weights_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "code_revision": {"type": "string", "minLength": 7, "maxLength": 200},
           "config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "config_file": {"type": "string", "pattern": "^artifacts/[A-Za-z0-9._/-]+\\.json$"},
           "raw_output_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "command": {
             "type": "array",

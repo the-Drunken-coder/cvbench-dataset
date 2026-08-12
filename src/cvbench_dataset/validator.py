@@ -15,7 +15,7 @@ from .errors import DatasetError
 from .schema import SCHEMA_NAMES, schema_bytes, validate_schema
 
 CLIP_FILENAMES = {"review.jsonl", "source.json", "tracks.jsonl", "video.mp4"}
-TOP_LEVEL_NAMES = {"clips", "dataset.yaml", "licenses", "release-manifest.json", "schemas"}
+TOP_LEVEL_NAMES = {"artifacts", "clips", "dataset.yaml", "licenses", "release-manifest.json", "schemas"}
 MODEL_ORIGINS = {"model_assisted", "model_generated"}
 
 

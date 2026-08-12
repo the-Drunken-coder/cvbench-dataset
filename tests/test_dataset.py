@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+import cvbench_dataset.source_recipe as source_recipe_module
 from cvbench_dataset import (
     DatasetError,
     build_release,
@@ -58,6 +59,10 @@ def _source_recipe(tmp_path: Path) -> tuple[Path, Path]:
     video.unlink()
     (clip / "review.jsonl").write_text("")
     source = json.loads((clip / "source.json").read_text())
+    config = recipe / "artifacts" / "synthetic-model-config.json"
+    config.parent.mkdir()
+    config.write_text('{"offline":true}\n')
+    config_sha256 = hashlib.sha256(config.read_bytes()).hexdigest()
     run_id = "sample-model-run"
     source["model_runs"] = [
         {
@@ -67,7 +72,8 @@ def _source_recipe(tmp_path: Path) -> tuple[Path, Path]:
             "weights_uri": "https://example.invalid/model.bin",
             "weights_sha256": "1" * 64,
             "code_revision": "abcdef1",
-            "config_sha256": "2" * 64,
+            "config_sha256": config_sha256,
+            "config_file": "artifacts/synthetic-model-config.json",
             "raw_output_sha256": "3" * 64,
             "command": ["synthetic-detector", "--offline"],
             "license": {"spdx": "MIT", "url": "https://opensource.org/license/mit"},
@@ -230,6 +236,53 @@ def test_source_recipe_rejects_media_drift_without_partial_output(tmp_path: Path
     with pytest.raises(DatasetError, match="hash mismatch"):
         hydrate_source_recipe(recipe, source_dir, output)
     assert not output.exists()
+
+
+def test_source_recipe_rejects_conflicting_hashes_for_one_filename(tmp_path: Path) -> None:
+    recipe, _ = _source_recipe(tmp_path)
+    descriptor = yaml.safe_load((recipe / "dataset.yaml").read_text())
+    descriptor["clips"].append({"id": "synthetic-clip-2", "path": "clips/synthetic-clip-2"})
+    (recipe / "dataset.yaml").write_text(yaml.safe_dump(descriptor, sort_keys=False))
+    source_clip = recipe / "clips" / "synthetic-clip"
+    second_clip = recipe / "clips" / "synthetic-clip-2"
+    shutil.copytree(source_clip, second_clip)
+    source = json.loads((second_clip / "source.json").read_text())
+    source["clip_id"] = "synthetic-clip-2"
+    source["source"]["sha256"] = "f" * 64
+    _write_json(second_clip / "source.json", source)
+    rows = [json.loads(line) for line in (second_clip / "tracks.jsonl").read_text().splitlines()]
+    for row in rows:
+        row["clip_id"] = "synthetic-clip-2"
+    (second_clip / "tracks.jsonl").write_text(
+        "".join(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n" for row in rows)
+    )
+    source_lock = json.loads((recipe / "source-lock.json").read_text())
+    source_lock["clips"].append(
+        {"id": "synthetic-clip-2", "filename": "synthetic-source.mp4", "sha256": "f" * 64}
+    )
+    _write_json(recipe / "source-lock.json", source_lock)
+
+    with pytest.raises(DatasetError, match="conflicting SHA-256"):
+        validate_source_recipe(recipe)
+
+
+def test_hydration_does_not_replace_target_created_during_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    output = tmp_path / "hydrated"
+    validate_dataset_original = source_recipe_module.validate_dataset
+
+    def validate_then_create_competing_output(root: Path):
+        result = validate_dataset_original(root)
+        output.mkdir()
+        (output / "owner.txt").write_text("preserve me\n")
+        return result
+
+    monkeypatch.setattr(source_recipe_module, "validate_dataset", validate_then_create_competing_output)
+    with pytest.raises(DatasetError, match="target already exists"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert (output / "owner.txt").read_text() == "preserve me\n"
 
 
 def test_source_recipe_rejects_non_model_labels(tmp_path: Path) -> None:

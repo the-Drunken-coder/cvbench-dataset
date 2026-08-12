@@ -13,8 +13,9 @@ material, not benchmark truth:
 Proposal IDs are frame-local detections, not trusted cross-frame identities.
 Missing proposals are unknown and must not be interpreted as verified
 background. The known visual audit exclusion for a repeated tree-root false
-positive is recorded in the model-run configuration hash, but that does not
-turn the remaining proposals into human-reviewed labels.
+positive is recorded in `artifacts/recovered-training-config.json` and bound to
+each model run by SHA-256, but that does not turn the remaining proposals into
+human-reviewed labels.
 
 ## Obtain and hydrate the media
 

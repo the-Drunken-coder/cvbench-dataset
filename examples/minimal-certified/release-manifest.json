@@ -82,10 +82,10 @@
       "sha256": "aa8c226261539030f3eca237dfb6c9fd88b5a65f20816c2dd96eeb925754380d"
     },
     {
-      "bytes": 3991,
+      "bytes": 4310,
       "path": "schemas/source-v1.schema.json",
       "role": "schema",
-      "sha256": "3092d7d816b766a4532887d47477d763e30e5b8e3858b0cf85902f0a165ab7a9"
+      "sha256": "7e7e1478adeb32dff62c44f27e223e559d5d5a8f29b5a09f283edb2016bb71f7"
     },
     {
       "bytes": 636,
@@ -101,6 +101,6 @@
     }
   ],
   "hash_algorithm": "sha256",
-  "manifest_content_sha256": "f2167177d0bd8f13e6d2d74b8262dcbbb7397fc4fe9032a5437fc29ea0adbe60",
+  "manifest_content_sha256": "c3b2c5c427cfff1106598537085793494309c8d11e5a01ab324b6a583b5d984b",
   "schema_version": "cvbench.dataset-release/v1"
 }
