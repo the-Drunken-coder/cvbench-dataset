@@ -1,0 +1,55 @@
+{
+  "clip_id": "pixabay-112059-dog-road",
+  "media": {
+    "fps_denominator": 1,
+    "fps_numerator": 30,
+    "frame_count": 406,
+    "height": 2160,
+    "width": 3840
+  },
+  "model_runs": [
+    {
+      "code_revision": "c3c32f728482ad8d3ad6da2fcb0439992d9f19d5",
+      "command": [
+        "python",
+        "-m",
+        "cvbench.recovered_training",
+        "--sample-fps",
+        "5.0",
+        "--confidence-threshold",
+        "0.25"
+      ],
+      "config_sha256": "bf34b59451e372050fbfcd906484742fd6e66595d4a8977bac7003f2dd114601",
+      "license": {
+        "spdx": "Apache-2.0",
+        "url": "https://github.com/Megvii-BaseDetection/YOLOX/blob/main/LICENSE"
+      },
+      "model_name": "Megvii YOLOX-X COCO 640 ONNX",
+      "model_version": "YOLOX-X COCO 640 ONNX",
+      "raw_output_sha256": "ca3f6368fa350e74ffa12ef8a7e5e0d9d547f9d8ed3f5b58d0104d4086180c4f",
+      "run_id": "yolox-x-pixabay-112059-dog-road",
+      "weights_sha256": "c892d7aaf1c4746d8a4d675bec669a4db4f434b4ee1efb654bc9b353379c7c55",
+      "weights_uri": "docker://cvbench-example-advanced-mot@sha256:bc04a103d4c2e1698d4818c39a84b1bb229a4c0243ea8aae806b9bcdd624c5ac#/app/models/yolox_x.onnx"
+    }
+  ],
+  "schema_version": "cvbench.source/v1",
+  "source": {
+    "license": {
+      "file": "licenses/Pixabay-Content-License.txt",
+      "name": "Pixabay Content License",
+      "spdx": "LicenseRef-Pixabay-Content",
+      "url": "https://pixabay.com/service/license-summary/"
+    },
+    "sha256": "b9fdd57c97d629552dcdb6063a88827a27dfa240834d39cd47dc992207842c1b",
+    "title": "RuslanSikunov - pixabay-112059-dog-road",
+    "uri": "https://pixabay.com/videos/young-woman-road-walk-in-the-woods-112059/"
+  },
+  "transformations": [
+    {
+      "config_sha256": "bf34b59451e372050fbfcd906484742fd6e66595d4a8977bac7003f2dd114601",
+      "description": "Sampled source frames at 5 FPS for non-exhaustive model proposals. Media bytes are unchanged.",
+      "kind": "annotation_sampling",
+      "tool": "cvbench.recovered_training at c3c32f728482ad8d3ad6da2fcb0439992d9f19d5"
+    }
+  ]
+}

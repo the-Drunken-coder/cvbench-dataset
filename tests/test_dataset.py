@@ -13,9 +13,11 @@ import yaml
 from cvbench_dataset import (
     DatasetError,
     build_release,
+    hydrate_source_recipe,
     import_contribution,
     init_dataset,
     validate_dataset,
+    validate_source_recipe,
     verify_release,
 )
 from cvbench_dataset.cli import main
@@ -39,6 +41,66 @@ def _draft_destination(tmp_path: Path) -> Path:
     descriptor["certification"].pop("certified_at")
     (dataset / "dataset.yaml").write_text(yaml.safe_dump(descriptor, sort_keys=False))
     return dataset
+
+
+def _source_recipe(tmp_path: Path) -> tuple[Path, Path]:
+    recipe = _draft_destination(tmp_path)
+    descriptor = yaml.safe_load((recipe / "dataset.yaml").read_text())
+    descriptor["data_role"] = "training_only"
+    descriptor["annotation_scope"] = "sparse"
+    (recipe / "dataset.yaml").write_text(yaml.safe_dump(descriptor, sort_keys=False))
+    clip = recipe / "clips" / "synthetic-clip"
+    video = clip / "video.mp4"
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    source_name = "synthetic-source.mp4"
+    shutil.copyfile(video, source_dir / source_name)
+    video.unlink()
+    (clip / "review.jsonl").write_text("")
+    source = json.loads((clip / "source.json").read_text())
+    run_id = "sample-model-run"
+    source["model_runs"] = [
+        {
+            "run_id": run_id,
+            "model_name": "Synthetic detector",
+            "model_version": "1",
+            "weights_uri": "https://example.invalid/model.bin",
+            "weights_sha256": "1" * 64,
+            "code_revision": "abcdef1",
+            "config_sha256": "2" * 64,
+            "raw_output_sha256": "3" * 64,
+            "command": ["synthetic-detector", "--offline"],
+            "license": {"spdx": "MIT", "url": "https://opensource.org/license/mit"},
+        }
+    ]
+    (clip / "source.json").write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
+    rows = []
+    for line in (clip / "tracks.jsonl").read_text().splitlines():
+        row = json.loads(line)
+        row["label_origin"] = {"kind": "model_generated", "model_run_ids": [run_id]}
+        rows.append(row)
+    (clip / "tracks.jsonl").write_text(
+        "".join(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n" for row in rows)
+    )
+    (recipe / "source-lock.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "cvbench.source-recipe/v1",
+                "clips": [
+                    {
+                        "id": "synthetic-clip",
+                        "filename": source_name,
+                        "sha256": source["source"]["sha256"],
+                    }
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    (recipe / "README.md").write_text("# Synthetic source recipe\n")
+    return recipe, source_dir
 
 
 def _studio_zip(tmp_path: Path, *, review_body: bytes = b"", unsafe_name: str | None = None) -> Path:
@@ -144,6 +206,42 @@ def test_init_never_promotes_declared_truth_to_evaluation_eligible(tmp_path: Pat
     )
     assert result["state"] == "draft"
     assert result["evaluation_eligible"] is False
+
+
+def test_source_recipe_hydrates_only_hash_pinned_local_media(tmp_path: Path) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    report = validate_source_recipe(recipe)
+    assert report.data_role == "training_only"
+    assert report.evaluation_eligible is False
+    assert report.clips[0].annotation_origins == {"model_generated": 2}
+
+    output = tmp_path / "hydrated"
+    result = hydrate_source_recipe(recipe, source_dir, output)
+    assert result["data_role"] == "training_only"
+    assert result["evaluation_eligible"] is False
+    assert result["annotation_origins"] == {"model_generated": 2}
+    assert validate_dataset(output).to_dict() == result
+
+
+def test_source_recipe_rejects_media_drift_without_partial_output(tmp_path: Path) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    (source_dir / "synthetic-source.mp4").write_bytes(b"changed")
+    output = tmp_path / "hydrated"
+    with pytest.raises(DatasetError, match="hash mismatch"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
+
+
+def test_source_recipe_rejects_non_model_labels(tmp_path: Path) -> None:
+    recipe, _ = _source_recipe(tmp_path)
+    tracks = recipe / "clips" / "synthetic-clip" / "tracks.jsonl"
+    rows = [json.loads(line) for line in tracks.read_text().splitlines()]
+    rows[0]["label_origin"] = {"kind": "human", "model_run_ids": []}
+    tracks.write_text(
+        "".join(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n" for row in rows)
+    )
+    with pytest.raises(DatasetError, match="model-derived"):
+        validate_source_recipe(recipe)
 
 
 @pytest.mark.parametrize("existing_kind", ["directory", "file"])

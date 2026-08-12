@@ -81,6 +81,28 @@ The ZIP must contain one explicit `clips/<clip-id>` package, its referenced
 license, and `contribution.json`. Reviews must be empty; imported labels remain
 draft until independent review occurs in the dataset repository.
 
+## Source-referenced training datasets
+
+Some source licenses permit model development but prohibit redistributing the
+unchanged video as a standalone file. For those datasets, commit a source
+recipe instead of the media bytes. A recipe retains the complete annotations,
+provenance, license notice, source filename, and SHA-256 while omitting only
+`video.mp4`.
+
+Validate and hydrate one with user-supplied originals:
+
+```sh
+cvbench-dataset validate-source-recipe datasets/recovered-clean-videos-v1
+cvbench-dataset hydrate-source-recipe datasets/recovered-clean-videos-v1 \
+  --source-dir "/path/to/verified/originals" \
+  --output .local-datasets/recovered-clean-videos-v1
+```
+
+Hydration requires the exact declared MP4 inventory and hashes, copies the
+media into a new canonical package, then runs the normal dataset validator.
+The destination is never partially replaced. Source recipes are always draft,
+training-only, evaluation-ineligible, and limited to model-derived labels.
+
 The archive contains one explicit `<dataset-id>-<version>/` root. Consumers
 lock its SHA-256, extract it into an ignored data directory, and verify the
 manifest before importing clip roots.

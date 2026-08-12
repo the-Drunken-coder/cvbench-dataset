@@ -1,0 +1,55 @@
+{
+  "clip_id": "pixabay-28855-ravine",
+  "media": {
+    "fps_denominator": 1,
+    "fps_numerator": 30,
+    "frame_count": 1467,
+    "height": 1080,
+    "width": 1920
+  },
+  "model_runs": [
+    {
+      "code_revision": "c3c32f728482ad8d3ad6da2fcb0439992d9f19d5",
+      "command": [
+        "python",
+        "-m",
+        "cvbench.recovered_training",
+        "--sample-fps",
+        "5.0",
+        "--confidence-threshold",
+        "0.25"
+      ],
+      "config_sha256": "bf34b59451e372050fbfcd906484742fd6e66595d4a8977bac7003f2dd114601",
+      "license": {
+        "spdx": "Apache-2.0",
+        "url": "https://github.com/Megvii-BaseDetection/YOLOX/blob/main/LICENSE"
+      },
+      "model_name": "Megvii YOLOX-X COCO 640 ONNX",
+      "model_version": "YOLOX-X COCO 640 ONNX",
+      "raw_output_sha256": "2c28ba2d2f01804ed907b319120a7fd61f88776f3bf2f86781d9bf6ac1fa3a34",
+      "run_id": "yolox-x-pixabay-28855-ravine",
+      "weights_sha256": "c892d7aaf1c4746d8a4d675bec669a4db4f434b4ee1efb654bc9b353379c7c55",
+      "weights_uri": "docker://cvbench-example-advanced-mot@sha256:bc04a103d4c2e1698d4818c39a84b1bb229a4c0243ea8aae806b9bcdd624c5ac#/app/models/yolox_x.onnx"
+    }
+  ],
+  "schema_version": "cvbench.source/v1",
+  "source": {
+    "license": {
+      "file": "licenses/Pixabay-Content-License.txt",
+      "name": "Pixabay Content License",
+      "spdx": "LicenseRef-Pixabay-Content",
+      "url": "https://pixabay.com/service/license-summary/"
+    },
+    "sha256": "825d9707b99ad212efc94e0dda630ba9253239b404c960002c7b385386e69641",
+    "title": "spoot (Alex Kuimov) - pixabay-28855-ravine",
+    "uri": "https://pixabay.com/videos/autumn-forest-tourists-walk-stream-28855/"
+  },
+  "transformations": [
+    {
+      "config_sha256": "bf34b59451e372050fbfcd906484742fd6e66595d4a8977bac7003f2dd114601",
+      "description": "Sampled source frames at 5 FPS for non-exhaustive model proposals. Media bytes are unchanged.",
+      "kind": "annotation_sampling",
+      "tool": "cvbench.recovered_training at c3c32f728482ad8d3ad6da2fcb0439992d9f19d5"
+    }
+  ]
+}

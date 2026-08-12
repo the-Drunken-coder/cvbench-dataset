@@ -1,0 +1,30 @@
+schema_version: cvbench.dataset/v1
+id: recovered-clean-videos-v1
+version: 0.1.0
+title: Recovered clean videos training proposals
+description: Five hash-pinned Pixabay and Pexels source videos with 5 FPS YOLOX-X model proposals. The labels are
+  non-exhaustive draft training data, not reviewed ground truth.
+state: draft
+data_role: training_only
+annotation_scope: sparse
+evaluation_eligible: false
+ontology:
+  classes:
+  - id: person
+    description: YOLOX-X proposal for a visible person.
+  - id: dog
+    description: YOLOX-X proposal for a visible dog.
+clips:
+- id: pexels-18187166-dune
+  path: clips/pexels-18187166-dune
+- id: pixabay-112059-dog-road
+  path: clips/pixabay-112059-dog-road
+- id: pixabay-145851-forest-bench
+  path: clips/pixabay-145851-forest-bench
+- id: pixabay-212474-forest-walk
+  path: clips/pixabay-212474-forest-walk
+- id: pixabay-28855-ravine
+  path: clips/pixabay-28855-ravine
+certification:
+  policy: cvbench.dataset-certification/v1
+  required_independent_approvals: 2

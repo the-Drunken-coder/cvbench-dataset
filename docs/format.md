@@ -53,7 +53,8 @@ Each annotation declares `label_origin.kind` as `human`, `upstream`,
 `model_assisted`, or `model_generated`. Model-derived annotations must name
 one or more `source.json.model_runs`. Each model run records its exact version,
 weight URI and hash, code revision, configuration hash, raw-output hash,
-command, and license.
+command, and license. Model proposal confidence is retained on each annotation
+when the source model provides it.
 
 Boxes use `[x_min, y_min, x_max, y_max]` in source pixels. Rows are uniquely
 sorted by `(frame_index, track_id)`. Frame timestamps must be consistent and
@@ -76,6 +77,31 @@ license file below `licenses/`.
 
 Package roots reject symlinks, special files, undeclared top-level entries,
 undeclared clip files, path traversal, and unresolved Git LFS pointers.
+
+## Source recipes
+
+A public training dataset may omit unchanged source media when redistribution
+terms require users to obtain the originals themselves. Its recipe uses the
+normal dataset descriptor, schemas, licenses, `source.json`, `tracks.jsonl`,
+and an empty `review.jsonl`, plus this root lock:
+
+```json
+{
+  "schema_version": "cvbench.source-recipe/v1",
+  "clips": [
+    {
+      "id": "clip-id",
+      "filename": "exact-source-name.mp4",
+      "sha256": "..."
+    }
+  ]
+}
+```
+
+The recipe itself is not a canonical release. It must remain a draft,
+training-only, evaluation-ineligible dataset with model-derived labels.
+`hydrate-source-recipe` verifies the complete source-video inventory and every
+hash before creating and validating a canonical local package.
 
 ## Studio contributions
 

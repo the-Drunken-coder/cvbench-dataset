@@ -94,13 +94,13 @@
       "sha256": "c53b575fbcce82ae1aa05837f490579f7d38a12483fddf737948c5bb81e35e63"
     },
     {
-      "bytes": 1478,
+      "bytes": 1544,
       "path": "schemas/track-annotation-v1.schema.json",
       "role": "schema",
-      "sha256": "736dfa51f755ac803c9ef84ce377ff5bfb89a5a43d0067fbd5bad983afa6bb79"
+      "sha256": "17f96ad1a41a14101178c6e82889486047b73acc86d1b4eab1d2a6201a890e3b"
     }
   ],
   "hash_algorithm": "sha256",
-  "manifest_content_sha256": "247f4be4246e60800f25cf89019fdb245c7264a4a6ecf308489acd396fcdeca9",
+  "manifest_content_sha256": "f2167177d0bd8f13e6d2d74b8262dcbbb7397fc4fe9032a5437fc29ea0adbe60",
   "schema_version": "cvbench.dataset-release/v1"
 }

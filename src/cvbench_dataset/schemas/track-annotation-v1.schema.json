@@ -27,6 +27,7 @@
       "maxItems": 4,
       "items": {"type": "number"}
     },
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
     "occlusion": {"enum": ["none", "partial", "heavy", "unknown"]},
     "truncated": {"type": "boolean"},
     "label_origin": {
