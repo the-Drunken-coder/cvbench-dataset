@@ -285,6 +285,34 @@ def test_hydration_does_not_replace_target_created_during_build(
     assert (output / "owner.txt").read_text() == "preserve me\n"
 
 
+def test_hydration_rechecks_copied_source_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    source_video = source_dir / "synthetic-source.mp4"
+    copyfile_original = source_recipe_module.shutil.copyfile
+
+    def replace_source_then_copy(source: Path, destination: Path, *args, **kwargs):
+        if Path(source) == source_video:
+            changed = bytearray(source_video.read_bytes())
+            changed[-1] ^= 1
+            source_video.write_bytes(changed)
+        return copyfile_original(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(source_recipe_module.shutil, "copyfile", replace_source_then_copy)
+    output = tmp_path / "hydrated"
+    with pytest.raises(DatasetError, match="changed during hydration"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
+
+
+def test_canonical_validation_rejects_config_artifact_drift(tmp_path: Path) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    output = tmp_path / "hydrated"
+    hydrate_source_recipe(recipe, source_dir, output)
+    (output / "artifacts" / "synthetic-model-config.json").write_text('{"offline":false}\n')
+    with pytest.raises(DatasetError, match="config_file SHA-256"):
+        validate_dataset(output)
+
+
 def test_source_recipe_rejects_non_model_labels(tmp_path: Path) -> None:
     recipe, _ = _source_recipe(tmp_path)
     tracks = recipe / "clips" / "synthetic-clip" / "tracks.jsonl"

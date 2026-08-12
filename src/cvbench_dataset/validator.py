@@ -158,6 +158,23 @@ def _assert_video(path: Path) -> None:
         raise DatasetError(f"{path} is not a self-contained MP4 file")
 
 
+def _validate_config_artifacts(root: Path, source: dict[str, Any], source_path: Path) -> None:
+    values = [*source["transformations"], *source["model_runs"]]
+    for value in values:
+        relative = value.get("config_file")
+        if relative is None:
+            continue
+        path = root / relative
+        try:
+            path.resolve().relative_to((root / "artifacts").resolve())
+        except ValueError as exc:
+            raise DatasetError(f"{source_path}: config_file escapes artifacts/") from exc
+        if path.is_symlink() or not path.is_file():
+            raise DatasetError(f"{source_path}: declared config_file is missing")
+        if sha256_file(path) != value["config_sha256"]:
+            raise DatasetError(f"{source_path}: config_file SHA-256 does not match config_sha256")
+
+
 def _validate_tracks(
     path: Path,
     *,
@@ -271,6 +288,7 @@ def _validate_clip(
     model_run_ids = [item["run_id"] for item in source["model_runs"]]
     if len(model_run_ids) != len(set(model_run_ids)):
         raise DatasetError(f"{source_path}: duplicate model run IDs")
+    _validate_config_artifacts(root, source, source_path)
     license_path = root / source["source"]["license"]["file"]
     try:
         license_path.resolve().relative_to((root / "licenses").resolve())

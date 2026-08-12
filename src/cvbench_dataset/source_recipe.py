@@ -277,7 +277,10 @@ def hydrate_source_recipe(
             else:
                 shutil.copy2(source, destination)
         for clip in report.clips:
-            shutil.copyfile(source_dir / clip.source_filename, temporary / "clips" / clip.id / "video.mp4")
+            copied_video = temporary / "clips" / clip.id / "video.mp4"
+            shutil.copyfile(source_dir / clip.source_filename, copied_video)
+            if sha256_file(copied_video) != clip.source_sha256:
+                raise DatasetError(f"source video changed during hydration: {clip.source_filename}")
         hydrated = validate_dataset(temporary).to_dict()
         try:
             output.mkdir()
