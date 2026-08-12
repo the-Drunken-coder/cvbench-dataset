@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import ctypes
+import errno
+import os
 import shutil
+import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -29,6 +33,46 @@ RECIPE_TOP_LEVEL_NAMES = {
     "schemas",
     "source-lock.json",
 }
+
+
+def _rename_no_replace(source: Path, destination: Path) -> None:
+    if sys.platform == "linux":
+        try:
+            rename = ctypes.CDLL(None, use_errno=True).renameat2
+        except AttributeError as exc:
+            raise DatasetError("atomic no-replace publication is unsupported") from exc
+        result = rename(
+            -100,  # AT_FDCWD
+            os.fsencode(source),
+            -100,
+            os.fsencode(destination),
+            1,  # RENAME_NOREPLACE
+        )
+    elif sys.platform == "darwin":
+        try:
+            rename = ctypes.CDLL(None, use_errno=True).renamex_np
+        except AttributeError as exc:
+            raise DatasetError("atomic no-replace publication is unsupported") from exc
+        result = rename(
+            os.fsencode(source),
+            os.fsencode(destination),
+            4,  # RENAME_EXCL
+        )
+    elif os.name == "nt":
+        try:
+            source.rename(destination)
+        except FileExistsError as exc:
+            raise DatasetError(f"hydrate target already exists: {destination}") from exc
+        return
+    else:
+        raise DatasetError("atomic no-replace publication is unsupported")
+
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise DatasetError(f"hydrate target already exists: {destination}")
+    raise OSError(error, os.strerror(error), destination)
 
 
 @dataclass(frozen=True)
@@ -295,17 +339,7 @@ def hydrate_source_recipe(
             if sha256_file(copied_video) != clip.source_sha256:
                 raise DatasetError(f"source video changed during hydration: {clip.source_filename}")
         hydrated = validate_dataset(temporary).to_dict()
-        try:
-            output.mkdir()
-        except FileExistsError as exc:
-            raise DatasetError(f"hydrate target already exists: {output}") from exc
-        try:
-            for path in temporary.iterdir():
-                path.replace(output / path.name)
-            temporary.rmdir()
-        except BaseException:
-            shutil.rmtree(output, ignore_errors=True)
-            raise
+        _rename_no_replace(temporary, output)
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise

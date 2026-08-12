@@ -285,6 +285,29 @@ def test_hydration_does_not_replace_target_created_during_build(
     assert (output / "owner.txt").read_text() == "preserve me\n"
 
 
+def test_hydration_publishes_complete_directory_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    output = tmp_path / "hydrated"
+    rename_original = source_recipe_module._rename_no_replace
+    calls = 0
+
+    def inspect_then_rename(source: Path, destination: Path) -> None:
+        nonlocal calls
+        calls += 1
+        assert destination == output
+        assert not destination.exists()
+        assert (source / "dataset.yaml").is_file()
+        assert (source / "clips" / "synthetic-clip" / "video.mp4").is_file()
+        rename_original(source, destination)
+
+    monkeypatch.setattr(source_recipe_module, "_rename_no_replace", inspect_then_rename)
+    hydrate_source_recipe(recipe, source_dir, output)
+    assert calls == 1
+    assert validate_dataset(output).id == "minimal-synthetic"
+
+
 def test_hydration_rechecks_copied_source_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     recipe, source_dir = _source_recipe(tmp_path)
     source_video = source_dir / "synthetic-source.mp4"
