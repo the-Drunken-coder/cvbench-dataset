@@ -533,11 +533,21 @@ def hydrate_source_recipe(
             raise DatasetError("source recipe changed during hydration")
         (temporary / "README.md").unlink()
         (temporary / "source-lock.json").unlink()
+        expected_hydrated_inventory = {
+            relative: digest
+            for relative, digest in snapshot_inventory.items()
+            if relative not in {"README.md", "source-lock.json"}
+        }
         for clip in copied_report.clips:
             copied_video = temporary / "clips" / clip.id / "video.mp4"
             shutil.copyfile(source_dir / clip.source_filename, copied_video)
             if sha256_file(copied_video) != clip.source_sha256:
                 raise DatasetError(f"source video changed during hydration: {clip.source_filename}")
+            expected_hydrated_inventory[
+                f"clips/{clip.id}/video.mp4"
+            ] = clip.source_sha256
+        if _recipe_inventory(temporary) != expected_hydrated_inventory:
+            raise DatasetError("source recipe artifacts changed during hydration")
         hydrated = validate_dataset(temporary).to_dict()
         _assert_output_parent_unchanged(output, opened_parent)
         try:
@@ -555,10 +565,14 @@ def hydrate_source_recipe(
         ):
             raise DatasetError("hydrate staging directory changed during publication")
         _assert_hydrated_recipe_constraints(temporary, copied_report, hydrated)
-        hydrated_inventory = _recipe_inventory(temporary)
+        if _recipe_inventory(temporary) != expected_hydrated_inventory:
+            raise DatasetError("hydrated dataset changed during publication")
         final_hydrated = validate_dataset(temporary).to_dict()
         _assert_hydrated_recipe_constraints(temporary, copied_report, final_hydrated)
-        if final_hydrated != hydrated or _recipe_inventory(temporary) != hydrated_inventory:
+        if (
+            final_hydrated != hydrated
+            or _recipe_inventory(temporary) != expected_hydrated_inventory
+        ):
             raise DatasetError("hydrated dataset changed during publication")
         try:
             _rename_no_replace(
@@ -596,7 +610,10 @@ def hydrate_source_recipe(
         try:
             published_report = validate_dataset(published_root).to_dict()
             _assert_hydrated_recipe_constraints(published_root, copied_report, published_report)
-            if published_report != hydrated or _recipe_inventory(published_root) != hydrated_inventory:
+            if (
+                published_report != hydrated
+                or _recipe_inventory(published_root) != expected_hydrated_inventory
+            ):
                 raise DatasetError("hydrated dataset changed during publication")
         except (DatasetError, OSError) as exc:
             rejected_name = _quarantine_rejected_publication(

@@ -588,7 +588,30 @@ def test_hydration_rechecks_recipe_constraints_after_media_copy(
 
     monkeypatch.setattr(source_recipe_module.shutil, "copyfile", copy_then_change_origin)
     output = tmp_path / "hydrated"
-    with pytest.raises(DatasetError, match="violates source recipe constraints"):
+    with pytest.raises(DatasetError, match="source recipe artifacts changed"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
+
+
+def test_hydration_preserves_recipe_artifact_hashes_during_media_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    copy_original = source_recipe_module.shutil.copyfile
+    mutated = False
+
+    def copy_then_change_license(source: Path, destination: Path, *args, **kwargs):
+        nonlocal mutated
+        result = copy_original(source, destination, *args, **kwargs)
+        destination = Path(destination)
+        if destination.name == "video.mp4" and not mutated:
+            (destination.parents[2] / "licenses" / "MIT.txt").write_text("changed license\n")
+            mutated = True
+        return result
+
+    monkeypatch.setattr(source_recipe_module.shutil, "copyfile", copy_then_change_license)
+    output = tmp_path / "hydrated"
+    with pytest.raises(DatasetError, match="source recipe artifacts changed"):
         hydrate_source_recipe(recipe, source_dir, output)
     assert not output.exists()
 
@@ -1155,6 +1178,51 @@ def test_release_publication_stays_bound_to_opened_output_parent(
     assert not output.exists()
     assert (parent / "owner.txt").read_text() == "replacement parent\n"
     assert (moved_parent / "release.tar.gz").read_bytes() == b"existing archive"
+
+
+def test_failed_release_quarantines_archive_in_detached_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _copy_sample(tmp_path)
+    parent = tmp_path / "publish"
+    parent.mkdir()
+    output = parent / "release.tar.gz"
+    moved_parent = tmp_path / "moved-publish"
+    publish_original = manifest_module._publish_archive
+
+    def publish_then_move_parent(stream, output: Path, expected_sha256: str, **kwargs):
+        published = publish_original(stream, output, expected_sha256, **kwargs)
+        parent.rename(moved_parent)
+        parent.mkdir()
+        return published
+
+    monkeypatch.setattr(manifest_module, "_publish_archive", publish_then_move_parent)
+    with pytest.raises(DatasetError, match="output parent changed during publication"):
+        build_release(dataset, output)
+    assert not output.exists()
+    rejected = list(moved_parent.glob(".release.tar.gz.rejected-*"))
+    assert len(rejected) == 1
+    verify_release(dataset, rejected[0])
+
+
+def test_release_revalidates_live_dataset_after_archive_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _copy_sample(tmp_path)
+    archive = tmp_path / "release.tar.gz"
+    publish_original = manifest_module._publish_archive
+
+    def publish_then_mutate_dataset(stream, output: Path, expected_sha256: str, **kwargs):
+        published = publish_original(stream, output, expected_sha256, **kwargs)
+        (dataset / "licenses" / "MIT.txt").write_text("changed after publication\n")
+        return published
+
+    monkeypatch.setattr(manifest_module, "_publish_archive", publish_then_mutate_dataset)
+    with pytest.raises(DatasetError, match="dataset changed after archive publication"):
+        build_release(dataset, archive)
+    assert not archive.exists()
+    rejected = list(tmp_path.glob(".release.tar.gz.rejected-*"))
+    assert len(rejected) == 1
 
 
 def test_release_refuses_existing_output(tmp_path: Path) -> None:
