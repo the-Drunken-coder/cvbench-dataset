@@ -139,6 +139,35 @@ class SourceRecipeReport:
         return asdict(self)
 
 
+def _assert_hydrated_recipe_constraints(
+    root: Path,
+    recipe: SourceRecipeReport,
+    hydrated: dict[str, Any],
+) -> None:
+    if any(
+        hydrated[key] != getattr(recipe, key)
+        for key in ("id", "version", "data_role", "annotation_scope", "evaluation_eligible")
+    ):
+        raise DatasetError("hydrated dataset no longer matches the source recipe")
+    recipe_clips = {clip.id: clip for clip in recipe.clips}
+    if {clip["id"] for clip in hydrated["clips"]} != set(recipe_clips):
+        raise DatasetError("hydrated dataset clips no longer match the source recipe")
+    for clip in hydrated["clips"]:
+        expected = recipe_clips[clip["id"]]
+        review = root / clip["path"] / "review.jsonl"
+        try:
+            review_is_empty = not review.read_bytes()
+        except OSError as exc:
+            raise DatasetError(f"cannot read hydrated review artifact {review}: {exc}") from exc
+        if (
+            clip["video_sha256"] != expected.source_sha256
+            or clip["annotation_rows"] != expected.annotation_rows
+            or clip["annotation_origins"] != expected.annotation_origins
+            or not review_is_empty
+        ):
+            raise DatasetError("hydrated dataset violates source recipe constraints")
+
+
 def _load_source_lock(root: Path) -> dict[str, Any]:
     path = root / "source-lock.json"
     value = _load_json(path)
@@ -401,6 +430,9 @@ def hydrate_source_recipe(
     try:
         os.mkdir(temporary_name, mode=0o700, dir_fd=parent_fd)
         staged_directory = os.stat(temporary_name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        os.close(parent_fd)
+        raise DatasetError(f"cannot create hydrate staging directory: {exc}") from exc
     except BaseException:
         os.close(parent_fd)
         raise
@@ -454,7 +486,6 @@ def hydrate_source_recipe(
             if sha256_file(copied_video) != clip.source_sha256:
                 raise DatasetError(f"source video changed during hydration: {clip.source_filename}")
         hydrated = validate_dataset(temporary).to_dict()
-        hydrated_inventory = _recipe_inventory(temporary)
         try:
             current_parent = os.stat(output.parent, follow_symlinks=False)
         except FileNotFoundError as exc:
@@ -479,10 +510,11 @@ def hydrate_source_recipe(
             != (staged_directory.st_dev, staged_directory.st_ino)
         ):
             raise DatasetError("hydrate staging directory changed during publication")
-        if (
-            validate_dataset(temporary).to_dict() != hydrated
-            or _recipe_inventory(temporary) != hydrated_inventory
-        ):
+        _assert_hydrated_recipe_constraints(temporary, copied_report, hydrated)
+        hydrated_inventory = _recipe_inventory(temporary)
+        final_hydrated = validate_dataset(temporary).to_dict()
+        _assert_hydrated_recipe_constraints(temporary, copied_report, final_hydrated)
+        if final_hydrated != hydrated or _recipe_inventory(temporary) != hydrated_inventory:
             raise DatasetError("hydrated dataset changed during publication")
         _rename_no_replace(
             Path(temporary.name),
@@ -490,6 +522,18 @@ def hydrate_source_recipe(
             source_dir_fd=parent_fd,
             destination_dir_fd=parent_fd,
         )
+        published = os.stat(output.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(published.st_mode)
+            or (published.st_dev, published.st_ino)
+            != (staged_directory.st_dev, staged_directory.st_ino)
+        ):
+            raise DatasetError("hydrate staging directory changed during publication")
+        published_root = _directory_fd_path(parent_fd) / output.name
+        published_report = validate_dataset(published_root).to_dict()
+        _assert_hydrated_recipe_constraints(published_root, copied_report, published_report)
+        if published_report != hydrated or _recipe_inventory(published_root) != hydrated_inventory:
+            raise DatasetError("hydrated dataset changed during publication")
     finally:
         os.close(parent_fd)
     return hydrated

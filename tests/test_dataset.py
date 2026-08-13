@@ -563,6 +563,74 @@ def test_hydration_rechecks_hydrated_bytes_before_publication(
     assert not output.exists()
 
 
+def test_hydration_rechecks_recipe_constraints_after_media_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    copy_original = source_recipe_module.shutil.copyfile
+    mutated = False
+
+    def copy_then_change_origin(source: Path, destination: Path, *args, **kwargs):
+        nonlocal mutated
+        result = copy_original(source, destination, *args, **kwargs)
+        destination = Path(destination)
+        if destination.name == "video.mp4" and not mutated:
+            tracks = destination.parent / "tracks.jsonl"
+            rows = [json.loads(line) for line in tracks.read_text().splitlines()]
+            rows[0]["label_origin"] = {"kind": "human", "model_run_ids": []}
+            tracks.write_text(
+                "".join(
+                    json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n" for row in rows
+                )
+            )
+            mutated = True
+        return result
+
+    monkeypatch.setattr(source_recipe_module.shutil, "copyfile", copy_then_change_origin)
+    output = tmp_path / "hydrated"
+    with pytest.raises(DatasetError, match="violates source recipe constraints"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
+
+
+def test_hydration_normalizes_staging_creation_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    mkdir_original = source_recipe_module.os.mkdir
+
+    def fail_staging(path, *args, **kwargs):
+        if str(path).startswith(".hydrated-"):
+            raise PermissionError("fixture staging denial")
+        return mkdir_original(path, *args, **kwargs)
+
+    monkeypatch.setattr(source_recipe_module.os, "mkdir", fail_staging)
+    with pytest.raises(DatasetError, match="cannot create hydrate staging directory"):
+        hydrate_source_recipe(recipe, source_dir, tmp_path / "hydrated")
+
+
+def test_hydration_detects_staging_swap_during_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    rename_original = source_recipe_module._rename_no_replace
+
+    def swap_then_rename(source: Path, destination: Path, **kwargs) -> None:
+        parent = source_recipe_module._directory_fd_path(kwargs["source_dir_fd"])
+        staging = parent / source
+        stolen = parent / f"{source}.stolen"
+        staging.rename(stolen)
+        shutil.copytree(stolen, staging)
+        (staging / "clips" / "synthetic-clip" / "video.mp4").write_bytes(b"replacement")
+        rename_original(source, destination, **kwargs)
+
+    monkeypatch.setattr(source_recipe_module, "_rename_no_replace", swap_then_rename)
+    output = tmp_path / "hydrated"
+    with pytest.raises(DatasetError, match="staging directory changed during publication"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert output.exists()
+
+
 def test_canonical_validation_rejects_config_artifact_drift(tmp_path: Path) -> None:
     recipe, source_dir = _source_recipe(tmp_path)
     output = tmp_path / "hydrated"
