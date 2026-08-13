@@ -618,6 +618,27 @@ def test_hydration_rejects_undeclared_recipe_root_entries(tmp_path: Path) -> Non
     assert not output.exists()
 
 
+def test_hydration_compares_snapshot_with_source_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    copytree_original = source_recipe_module.shutil.copytree
+
+    def copytree_with_transient_substitution(source: Path, destination: Path, *args, **kwargs):
+        result = copytree_original(source, destination, *args, **kwargs)
+        if Path(source).name == "clips":
+            tracks = Path(destination) / "synthetic-clip" / "tracks.jsonl"
+            rows = [json.loads(line) for line in tracks.read_text().splitlines()]
+            tracks.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+        return result
+
+    monkeypatch.setattr(source_recipe_module.shutil, "copytree", copytree_with_transient_substitution)
+    output = tmp_path / "hydrated"
+    with pytest.raises(DatasetError, match="source recipe changed during hydration"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
+
+
 def test_hydration_detects_staging_swap_during_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

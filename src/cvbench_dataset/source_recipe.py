@@ -495,6 +495,8 @@ def hydrate_source_recipe(
         ):
             raise DatasetError("source recipe changed during hydration")
         snapshot_inventory = _recipe_inventory(temporary)
+        if snapshot_inventory != source_inventory:
+            raise DatasetError("source recipe changed during hydration")
         copied_report = validate_source_recipe(temporary)
         if _recipe_inventory(temporary) != snapshot_inventory:
             raise DatasetError("source recipe changed during hydration")
