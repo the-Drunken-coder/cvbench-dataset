@@ -324,19 +324,45 @@ def test_hydration_publishes_complete_directory_once(
     rename_original = source_recipe_module._rename_no_replace
     calls = 0
 
-    def inspect_then_rename(source: Path, destination: Path) -> None:
+    def inspect_then_rename(source: Path, destination: Path, **kwargs) -> None:
         nonlocal calls
         calls += 1
-        assert destination == output
-        assert not destination.exists()
-        assert (source / "dataset.yaml").is_file()
-        assert (source / "clips" / "synthetic-clip" / "video.mp4").is_file()
-        rename_original(source, destination)
+        assert destination == Path(output.name)
+        assert not output.exists()
+        staged = source_recipe_module._directory_fd_path(kwargs["source_dir_fd"]) / source
+        assert (staged / "dataset.yaml").is_file()
+        assert (staged / "clips" / "synthetic-clip" / "video.mp4").is_file()
+        rename_original(source, destination, **kwargs)
 
     monkeypatch.setattr(source_recipe_module, "_rename_no_replace", inspect_then_rename)
     hydrate_source_recipe(recipe, source_dir, output)
     assert calls == 1
     assert validate_dataset(output).id == "minimal-synthetic"
+
+
+def test_hydration_rejects_replaced_output_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    parent = tmp_path / "publish"
+    parent.mkdir()
+    output = parent / "hydrated"
+    moved_parent = tmp_path / "moved-publish"
+    redirected = tmp_path / "redirected"
+    redirected.mkdir()
+    validate_original = source_recipe_module.validate_dataset
+
+    def validate_then_replace_parent(root: Path):
+        result = validate_original(root)
+        parent.rename(moved_parent)
+        parent.symlink_to(redirected, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(source_recipe_module, "validate_dataset", validate_then_replace_parent)
+    with pytest.raises(DatasetError, match="output parent changed"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not (redirected / "hydrated").exists()
+    assert not (moved_parent / "hydrated").exists()
 
 
 def test_hydration_rejects_output_inside_source_recipe(tmp_path: Path) -> None:
@@ -515,6 +541,7 @@ def test_committed_certified_fixture_validates_and_exposes_origin_counts() -> No
 
 def test_release_build_is_byte_deterministic_and_verifiable(tmp_path: Path) -> None:
     dataset = _copy_sample(tmp_path)
+    (dataset / "licenses" / "release-manifest.json").mkdir()
     first = tmp_path / "first.tar.gz"
     second = tmp_path / "second.tar.gz"
     first_result = build_release(dataset, first)

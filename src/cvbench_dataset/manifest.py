@@ -203,7 +203,12 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f".{output.name}.", dir=output.parent) as temporary:
         snapshot = Path(temporary) / "dataset"
-        shutil.copytree(root, snapshot, symlinks=True, ignore=shutil.ignore_patterns(MANIFEST_NAME))
+        def ignore_root_manifest(directory: str, names: list[str]) -> set[str]:
+            if Path(directory).resolve() == root and MANIFEST_NAME in names:
+                return {MANIFEST_NAME}
+            return set()
+
+        shutil.copytree(root, snapshot, symlinks=True, ignore=ignore_root_manifest)
         report = validate_dataset(snapshot, require_manifest=False)
         if report.state != "certified":
             raise DatasetError("build-release requires dataset state certified")

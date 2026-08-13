@@ -4,8 +4,10 @@ import ctypes
 import errno
 import os
 import shutil
+import stat
 import sys
 import tempfile
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -35,30 +37,49 @@ RECIPE_TOP_LEVEL_NAMES = {
 }
 
 
-def _rename_no_replace(source: Path, destination: Path) -> None:
+def _directory_fd_path(directory_fd: int) -> Path:
+    if sys.platform == "darwin":
+        import fcntl
+
+        value = fcntl.fcntl(directory_fd, 50, b"\0" * 1024)  # F_GETPATH
+        return Path(value.split(b"\0", 1)[0].decode())
+    return Path("/proc/self/fd") / str(directory_fd)
+
+
+def _rename_no_replace(
+    source: Path,
+    destination: Path,
+    *,
+    source_dir_fd: int = -100,
+    destination_dir_fd: int = -100,
+) -> None:
     if sys.platform == "linux":
         try:
             rename = ctypes.CDLL(None, use_errno=True).renameat2
         except AttributeError as exc:
             raise DatasetError("atomic no-replace publication is unsupported") from exc
         result = rename(
-            -100,  # AT_FDCWD
+            source_dir_fd,
             os.fsencode(source),
-            -100,
+            destination_dir_fd,
             os.fsencode(destination),
             1,  # RENAME_NOREPLACE
         )
     elif sys.platform == "darwin":
         try:
-            rename = ctypes.CDLL(None, use_errno=True).renamex_np
+            rename = ctypes.CDLL(None, use_errno=True).renameatx_np
         except AttributeError as exc:
             raise DatasetError("atomic no-replace publication is unsupported") from exc
         result = rename(
+            source_dir_fd,
             os.fsencode(source),
+            destination_dir_fd,
             os.fsencode(destination),
             4,  # RENAME_EXCL
         )
     elif os.name == "nt":
+        if source_dir_fd != -100 or destination_dir_fd != -100:
+            raise DatasetError("directory-anchored publication is unsupported")
         try:
             source.rename(destination)
         except FileExistsError as exc:
@@ -321,7 +342,22 @@ def hydrate_source_recipe(
     else:
         raise DatasetError("hydrate output must be outside the source recipe")
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}-", dir=output.parent))
+    if os.name == "nt":
+        temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}-", dir=output.parent))
+        parent_fd = None
+        temporary_name = None
+    else:
+        parent_fd = os.open(output.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.stat(output.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            os.close(parent_fd)
+            raise DatasetError(f"hydrate target already exists: {output}")
+        temporary_name = f".{output.name}-{uuid.uuid4().hex}"
+        os.mkdir(temporary_name, mode=0o700, dir_fd=parent_fd)
+        temporary = _directory_fd_path(parent_fd) / temporary_name
     try:
         for name in (
             "README.md",
@@ -349,8 +385,35 @@ def hydrate_source_recipe(
             if sha256_file(copied_video) != clip.source_sha256:
                 raise DatasetError(f"source video changed during hydration: {clip.source_filename}")
         hydrated = validate_dataset(temporary).to_dict()
-        _rename_no_replace(temporary, output)
+        if parent_fd is None:
+            _rename_no_replace(temporary, output)
+        else:
+            opened_parent = os.fstat(parent_fd)
+            try:
+                current_parent = os.stat(output.parent, follow_symlinks=False)
+            except FileNotFoundError as exc:
+                raise DatasetError("hydrate output parent changed during publication") from exc
+            if (
+                not stat.S_ISDIR(current_parent.st_mode)
+                or (current_parent.st_dev, current_parent.st_ino)
+                != (opened_parent.st_dev, opened_parent.st_ino)
+            ):
+                raise DatasetError("hydrate output parent changed during publication")
+            _rename_no_replace(
+                Path(temporary.name),
+                Path(output.name),
+                source_dir_fd=parent_fd,
+                destination_dir_fd=parent_fd,
+            )
     except BaseException:
-        shutil.rmtree(temporary, ignore_errors=True)
+        cleanup = (
+            temporary
+            if parent_fd is None
+            else _directory_fd_path(parent_fd) / str(temporary_name)
+        )
+        shutil.rmtree(cleanup, ignore_errors=True)
         raise
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
     return hydrated
