@@ -714,9 +714,8 @@ def test_hydration_rechecks_requested_parent_after_publication(
     with pytest.raises(DatasetError, match="output parent changed during publication"):
         hydrate_source_recipe(recipe, source_dir, output)
     assert not output.exists()
-    rejected = list(moved_parent.glob(".hydrated.rejected-*"))
-    assert len(rejected) == 1
-    assert validate_dataset(rejected[0]).id == "minimal-synthetic"
+    assert validate_dataset(moved_parent / "hydrated").id == "minimal-synthetic"
+    assert not list(moved_parent.glob(".hydrated.rejected-*"))
 
 
 def test_hydration_requires_existing_output_parent(tmp_path: Path) -> None:
@@ -727,7 +726,7 @@ def test_hydration_requires_existing_output_parent(tmp_path: Path) -> None:
     assert not output.exists()
 
 
-def test_hydration_quarantines_content_mutated_during_publication(
+def test_hydration_leaves_mutated_publication_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     recipe, source_dir = _source_recipe(tmp_path)
@@ -748,12 +747,11 @@ def test_hydration_quarantines_content_mutated_during_publication(
     output = tmp_path / "hydrated"
     with pytest.raises(DatasetError, match="hydrated dataset changed during publication"):
         hydrate_source_recipe(recipe, source_dir, output)
-    assert not output.exists()
-    rejected = list(tmp_path.glob(".hydrated.rejected-*"))
-    assert len(rejected) == 1
+    assert (output / "clips" / "synthetic-clip" / "video.mp4").read_bytes() == b"replacement"
+    assert not list(tmp_path.glob(".hydrated.rejected-*"))
 
 
-def test_hydration_quarantines_after_post_publication_io_failure(
+def test_hydration_leaves_publication_after_post_publication_io_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     recipe, source_dir = _source_recipe(tmp_path)
@@ -768,41 +766,8 @@ def test_hydration_quarantines_after_post_publication_io_failure(
     monkeypatch.setattr(source_recipe_module, "validate_dataset", fail_published_read)
     with pytest.raises(DatasetError, match="hydrated dataset changed during publication"):
         hydrate_source_recipe(recipe, source_dir, output)
-    assert not output.exists()
-    rejected = list(tmp_path.glob(".hydrated.rejected-*"))
-    assert len(rejected) == 1
-
-
-def test_hydration_does_not_quarantine_replacement_content(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    recipe, source_dir = _source_recipe(tmp_path)
-    rename_original = source_recipe_module._rename_no_replace
-    published = False
-    displaced = tmp_path / "displaced-rejected-publication"
-
-    def replace_before_quarantine(source: Path, destination: Path, **kwargs) -> None:
-        nonlocal published
-        parent = source_recipe_module._directory_fd_path(kwargs["source_dir_fd"])
-        if not published:
-            published = True
-            rename_original(source, destination, **kwargs)
-            (parent / destination / "clips" / "synthetic-clip" / "video.mp4").write_bytes(
-                b"invalid publication"
-            )
-            return
-        current = parent / source
-        current.rename(displaced)
-        current.mkdir()
-        (current / "owner.txt").write_text("unrelated replacement\n")
-        rename_original(source, destination, **kwargs)
-
-    monkeypatch.setattr(source_recipe_module, "_rename_no_replace", replace_before_quarantine)
-    output = tmp_path / "hydrated"
-    with pytest.raises(DatasetError, match="could not be quarantined"):
-        hydrate_source_recipe(recipe, source_dir, output)
-    assert (output / "owner.txt").read_text() == "unrelated replacement\n"
-    assert displaced.is_dir()
+    assert output.is_dir()
+    assert not list(tmp_path.glob(".hydrated.rejected-*"))
 
 
 def test_hydration_rejects_replacement_before_publication_identity_check(
@@ -826,7 +791,7 @@ def test_hydration_rejects_replacement_before_publication_identity_check(
 
     monkeypatch.setattr(source_recipe_module, "_rename_no_replace", publish_then_replace)
     output = tmp_path / "hydrated"
-    with pytest.raises(DatasetError, match="could not be quarantined"):
+    with pytest.raises(DatasetError, match="published name changed"):
         hydrate_source_recipe(recipe, source_dir, output)
     assert (output / "owner.txt").read_text() == "unrelated replacement\n"
     assert validate_dataset(displaced).id == "minimal-synthetic"
@@ -1074,9 +1039,9 @@ def test_release_rechecks_directories_immediately_before_publication(
 
     monkeypatch.setattr(manifest_module, "verify_manifest", verify_then_add_directory)
     archive = tmp_path / "release.tar.gz"
-    with pytest.raises(DatasetError, match="changed during release publication"):
+    with pytest.raises(DatasetError, match="changed after archive publication"):
         build_release(dataset, archive)
-    assert not archive.exists()
+    assert archive.exists()
 
 
 def test_release_binds_snapshot_hashes_through_archive_construction(
@@ -1155,7 +1120,7 @@ def test_release_rebinds_output_name_after_hashing_published_inode(
     assert displaced.is_file()
 
 
-def test_release_quarantines_archive_that_fails_post_rename_verification(
+def test_release_leaves_changed_publication_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dataset = _copy_sample(tmp_path)
@@ -1173,10 +1138,8 @@ def test_release_quarantines_archive_that_fails_post_rename_verification(
     monkeypatch.setattr(manifest_module, "_stream_sha256", mutate_then_hash)
     with pytest.raises(DatasetError, match="changed during publication"):
         build_release(dataset, archive)
-    assert not archive.exists()
-    rejected = list(tmp_path.glob(".release.tar.gz.rejected-*"))
-    assert len(rejected) == 1
-    assert rejected[0].read_bytes() == b"changed during publication"
+    assert archive.read_bytes() == b"changed during publication"
+    assert not list(tmp_path.glob(".release.tar.gz.rejected-*"))
 
 
 def test_release_detects_same_length_rewrite_after_hashing(
@@ -1199,36 +1162,11 @@ def test_release_detects_same_length_rewrite_after_hashing(
     monkeypatch.setattr(manifest_module, "_stream_sha256", hash_then_rewrite)
     with pytest.raises(DatasetError, match="changed during publication"):
         build_release(dataset, archive)
-    assert not archive.exists()
-    rejected = list(tmp_path.glob(".release.tar.gz.rejected-*"))
-    assert len(rejected) == 1
+    assert archive.exists()
+    assert not list(tmp_path.glob(".release.tar.gz.rejected-*"))
 
 
-def test_release_publication_stays_bound_to_opened_output_parent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    dataset = _copy_sample(tmp_path)
-    parent = tmp_path / "publish"
-    parent.mkdir()
-    output = parent / "release.tar.gz"
-    moved_parent = tmp_path / "moved-publish"
-    probe_original = manifest_module._probe_archive_publication
-
-    def probe_then_move_parent(output: Path, parent_fd: int) -> None:
-        probe_original(output, parent_fd)
-        parent.rename(moved_parent)
-        parent.mkdir()
-        (parent / "owner.txt").write_text("replacement parent\n")
-
-    monkeypatch.setattr(manifest_module, "_probe_archive_publication", probe_then_move_parent)
-    with pytest.raises(DatasetError, match="output parent changed during publication"):
-        build_release(dataset, output)
-    assert not output.exists()
-    assert (parent / "owner.txt").read_text() == "replacement parent\n"
-    assert not (moved_parent / "release.tar.gz").exists()
-
-
-def test_failed_release_quarantines_archive_in_detached_parent(
+def test_failed_release_leaves_archive_in_detached_parent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dataset = _copy_sample(tmp_path)
@@ -1248,9 +1186,10 @@ def test_failed_release_quarantines_archive_in_detached_parent(
     with pytest.raises(DatasetError, match="output parent changed during publication"):
         build_release(dataset, output)
     assert not output.exists()
-    rejected = list(moved_parent.glob(".release.tar.gz.rejected-*"))
-    assert len(rejected) == 1
-    verify_release(dataset, rejected[0])
+    detached_archive = moved_parent / "release.tar.gz"
+    with tarfile.open(detached_archive, "r:gz") as release:
+        assert "minimal-synthetic-1.0.0/release-manifest.json" in release.getnames()
+    assert not list(moved_parent.glob(".release.tar.gz.rejected-*"))
 
 
 def test_release_revalidates_live_dataset_after_archive_publication(
@@ -1268,9 +1207,8 @@ def test_release_revalidates_live_dataset_after_archive_publication(
     monkeypatch.setattr(manifest_module, "_publish_archive", publish_then_mutate_dataset)
     with pytest.raises(DatasetError, match="dataset changed after archive publication"):
         build_release(dataset, archive)
-    assert not archive.exists()
-    rejected = list(tmp_path.glob(".release.tar.gz.rejected-*"))
-    assert len(rejected) == 1
+    assert archive.exists()
+    assert not list(tmp_path.glob(".release.tar.gz.rejected-*"))
 
 
 def test_release_reverifies_archive_after_final_dataset_checks(
@@ -1292,10 +1230,8 @@ def test_release_reverifies_archive_after_final_dataset_checks(
     monkeypatch.setattr(manifest_module, "verify_manifest", verify_then_mutate_archive)
     with pytest.raises(DatasetError, match="changed after final dataset validation"):
         build_release(dataset, archive)
-    assert not archive.exists()
-    rejected = list(tmp_path.glob(".release.tar.gz.rejected-*"))
-    assert len(rejected) == 1
-    assert rejected[0].read_bytes() == b"changed after dataset validation"
+    assert archive.read_bytes() == b"changed after dataset validation"
+    assert not list(tmp_path.glob(".release.tar.gz.rejected-*"))
 
 
 def test_release_refuses_existing_output(tmp_path: Path) -> None:
@@ -1335,7 +1271,7 @@ def test_build_release_rejects_unsupported_platform_before_mutation(
     assert not output.parent.exists()
 
 
-def test_build_release_probes_output_rename_before_dataset_mutation(
+def test_build_release_attempts_publication_before_dataset_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dataset = _copy_sample(tmp_path)
@@ -1350,7 +1286,7 @@ def test_build_release_probes_output_rename_before_dataset_mutation(
         raise DatasetError("atomic no-replace publication is unsupported")
 
     monkeypatch.setattr(manifest_module, "_rename_no_replace", unsupported_rename)
-    with pytest.raises(DatasetError, match="unsupported for the output parent"):
+    with pytest.raises(DatasetError, match="release archive could not be published"):
         build_release(dataset, output)
 
     after = {
@@ -1360,7 +1296,9 @@ def test_build_release_probes_output_rename_before_dataset_mutation(
     }
     assert after == before
     assert not output.exists()
-    assert not list(tmp_path.glob(".release.tar.gz.probe-*"))
+    staging = list(tmp_path.glob(".release.tar.gz.*"))
+    assert len(staging) == 1
+    assert staging[0].is_file()
 
 
 def test_build_release_fails_closed_for_noncertified_state(tmp_path: Path) -> None:

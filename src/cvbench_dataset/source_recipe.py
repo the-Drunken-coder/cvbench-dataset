@@ -189,27 +189,6 @@ def _assert_output_parent_unchanged(output: Path, opened_parent: os.stat_result)
         raise DatasetError("hydrate output parent changed during publication")
 
 
-def _quarantine_rejected_publication(
-    parent_fd: int,
-    output_name: str,
-    expected_publication: os.stat_result,
-) -> str:
-    rejected_name = f".{output_name}.rejected-{uuid.uuid4().hex}"
-    try:
-        _rename_no_replace(
-            Path(output_name),
-            Path(rejected_name),
-            source_dir_fd=parent_fd,
-            destination_dir_fd=parent_fd,
-            expected_source=expected_publication,
-        )
-    except DatasetError as exc:
-        raise DatasetError(
-            "hydrate staging directory changed during publication and could not be quarantined"
-        ) from exc
-    return rejected_name
-
-
 def _load_source_lock(root: Path) -> dict[str, Any]:
     path = root / "source-lock.json"
     value = _load_json(path)
@@ -590,21 +569,15 @@ def hydrate_source_recipe(
             published = os.stat(output.name, dir_fd=parent_fd, follow_symlinks=False)
         except OSError as exc:
             raise DatasetError(
-                "hydrate staging directory changed during publication and could not be quarantined"
+                "hydrate published name changed during publication; output left untouched"
             ) from exc
         if (
             not stat.S_ISDIR(published.st_mode)
             or (published.st_dev, published.st_ino)
             != (staged_directory.st_dev, staged_directory.st_ino)
         ):
-            rejected_name = _quarantine_rejected_publication(
-                parent_fd,
-                output.name,
-                staged_directory,
-            )
             raise DatasetError(
-                "hydrate staging directory changed during publication; "
-                f"rejected content retained as {rejected_name}"
+                "hydrate published name changed during publication; output left untouched"
             )
         published_root = _directory_fd_path(parent_fd) / output.name
         try:
@@ -616,26 +589,15 @@ def hydrate_source_recipe(
             ):
                 raise DatasetError("hydrated dataset changed during publication")
         except (DatasetError, OSError) as exc:
-            rejected_name = _quarantine_rejected_publication(
-                parent_fd,
-                output.name,
-                staged_directory,
-            )
             raise DatasetError(
-                "hydrated dataset changed during publication; "
-                f"rejected content retained as {rejected_name}"
+                "hydrated dataset changed during publication; output left untouched"
             ) from exc
         try:
             _assert_output_parent_unchanged(output, opened_parent)
         except DatasetError as exc:
-            rejected_name = _quarantine_rejected_publication(
-                parent_fd,
-                output.name,
-                staged_directory,
-            )
             raise DatasetError(
                 "hydrate output parent changed during publication; "
-                f"published content retained as {rejected_name} through the opened parent"
+                "published content left untouched through the opened parent"
             ) from exc
     finally:
         os.close(parent_fd)

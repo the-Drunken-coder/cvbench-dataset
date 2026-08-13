@@ -8,7 +8,6 @@ import shutil
 import tarfile
 import tempfile
 import uuid
-from contextlib import suppress
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -351,6 +350,7 @@ def _publish_archive(
     parent_fd: int | None = None,
 ) -> os.stat_result:
     temporary_name = f".{output.name}.{uuid.uuid4().hex}"
+    stream.seek(0)
     if parent_fd is None:
         descriptor = os.open(
             output.parent / temporary_name,
@@ -364,8 +364,8 @@ def _publish_archive(
             0o600,
             dir_fd=parent_fd,
         )
+    renamed = False
     try:
-        stream.seek(0)
         digest = hashlib.sha256()
         with os.fdopen(descriptor, "wb") as destination:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -383,114 +383,32 @@ def _publish_archive(
         )
         if (current.st_dev, current.st_ino) != (staged.st_dev, staged.st_ino):
             raise DatasetError("staged release archive changed before publication")
-        renamed = False
-        try:
-            if parent_fd is None:
-                _rename_no_replace(output.parent / temporary_name, output, expected_source=staged)
-            else:
-                _rename_no_replace(
-                    Path(temporary_name),
-                    Path(output.name),
-                    source_dir_fd=parent_fd,
-                    destination_dir_fd=parent_fd,
-                    expected_source=staged,
-                )
-            renamed = True
-            published = _assert_published_archive(
-                output,
-                staged,
-                expected_sha256,
-                parent_fd=parent_fd,
+        if parent_fd is None:
+            _rename_no_replace(output.parent / temporary_name, output, expected_source=staged)
+        else:
+            _rename_no_replace(
+                Path(temporary_name),
+                Path(output.name),
+                source_dir_fd=parent_fd,
+                destination_dir_fd=parent_fd,
+                expected_source=staged,
             )
-        except (DatasetError, OSError) as exc:
-            if not renamed:
-                if isinstance(exc, DatasetError):
-                    raise
-                raise DatasetError("release archive changed during publication") from exc
-            try:
-                rejected_name = _quarantine_release_archive(
-                    parent_fd,
-                    output,
-                    staged,
-                )
-            except DatasetError as quarantine_error:
-                raise DatasetError(
-                    "release archive changed during publication and could not be quarantined"
-                ) from quarantine_error
-            raise DatasetError(
-                "release archive changed during publication; "
-                f"rejected archive retained as {rejected_name}"
-            ) from exc
-        return published
-    finally:
-        with suppress(FileNotFoundError):
-            os.unlink(
-                temporary_name if parent_fd is not None else output.parent / temporary_name,
-                dir_fd=parent_fd,
-            )
-
-
-def _quarantine_release_archive(
-    parent_fd: int | None,
-    output: Path,
-    expected_publication: os.stat_result,
-) -> str:
-    rejected_name = f".{output.name}.rejected-{uuid.uuid4().hex}"
-    source = Path(output.name) if parent_fd is not None else output
-    destination = Path(rejected_name) if parent_fd is not None else output.with_name(rejected_name)
-    try:
-        _rename_no_replace(
-            source,
-            destination,
-            source_dir_fd=parent_fd if parent_fd is not None else -100,
-            destination_dir_fd=parent_fd if parent_fd is not None else -100,
-            expected_source=expected_publication,
+        renamed = True
+        return _assert_published_archive(
+            output,
+            staged,
+            expected_sha256,
+            parent_fd=parent_fd,
         )
-    except DatasetError as exc:
-        raise DatasetError("failed release archive could not be quarantined") from exc
-    quarantined = os.stat(destination, dir_fd=parent_fd, follow_symlinks=False)
-    if (quarantined.st_dev, quarantined.st_ino) != (
-        expected_publication.st_dev,
-        expected_publication.st_ino,
-    ):
-        raise DatasetError("failed release archive could not be quarantined")
-    return str(destination)
-
-
-def _probe_archive_publication(output: Path, parent_fd: int) -> None:
-    """Prove the output filesystem supports the bound no-replace rename."""
-    source_name = f".{output.name}.probe-{uuid.uuid4().hex}"
-    destination_name = f"{source_name}.published"
-    try:
-        descriptor = os.open(
-            source_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            0o600,
-            dir_fd=parent_fd,
-        )
-        with os.fdopen(descriptor, "wb") as probe:
-            probe.write(b"cvbench release publication probe\n")
-            probe.flush()
-            os.fsync(probe.fileno())
-            expected = os.fstat(probe.fileno())
-        _rename_no_replace(
-            Path(source_name),
-            Path(destination_name),
-            source_dir_fd=parent_fd,
-            destination_dir_fd=parent_fd,
-            expected_source=expected,
-        )
-        published = os.stat(destination_name, dir_fd=parent_fd, follow_symlinks=False)
-        if (published.st_dev, published.st_ino) != (expected.st_dev, expected.st_ino):
-            raise DatasetError("release publication probe changed during rename")
     except (DatasetError, OSError) as exc:
+        if renamed:
+            raise DatasetError(
+                "release archive changed during publication; published name left untouched"
+            ) from exc
         raise DatasetError(
-            "directory-anchored release publication is unsupported for the output parent"
+            f"release archive could not be published ({exc}); staging name left untouched: "
+            f"{temporary_name}"
         ) from exc
-    finally:
-        for name in (source_name, destination_name):
-            with suppress(FileNotFoundError):
-                os.unlink(name, dir_fd=parent_fd)
 
 
 def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
@@ -514,7 +432,6 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
             pass
         else:
             raise DatasetError(f"release archive already exists: {output}")
-        _probe_archive_publication(output, parent_fd)
         with tempfile.TemporaryDirectory(prefix=f"cvbench-{output.name}.") as temporary:
             snapshot = Path(temporary) / "dataset"
 
@@ -562,14 +479,6 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
                     or _release_inventory(root) != _release_inventory(snapshot)
                 ):
                     raise DatasetError("dataset changed during release build")
-                _write_atomic(root / MANIFEST_NAME, manifest_body)
-                verify_manifest(root)
-                final_report = validate_dataset(root, require_manifest=False)
-                if (
-                    make_manifest(root, final_report) != manifest
-                    or _release_inventory(root) != _release_inventory(snapshot)
-                ):
-                    raise DatasetError("dataset changed during release publication")
                 _assert_output_parent_unchanged(output, opened_parent)
                 try:
                     published_archive = _publish_archive(
@@ -589,7 +498,23 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
                         or _release_inventory(root) != _release_inventory(snapshot)
                     ):
                         raise DatasetError("dataset changed after archive publication")
+                    _assert_output_parent_unchanged(output, opened_parent)
+                    _assert_published_archive(
+                        output,
+                        published_archive,
+                        archive_sha256,
+                        parent_fd=parent_fd,
+                        expected_revision=published_archive,
+                    )
+                    _write_atomic(root / MANIFEST_NAME, manifest_body)
                     verify_manifest(root, published_report)
+                    final_report = validate_dataset(root, require_manifest=False)
+                    if (
+                        make_manifest(root, final_report) != manifest
+                        or _release_inventory(root) != _release_inventory(snapshot)
+                    ):
+                        raise DatasetError("dataset changed after release manifest publication")
+                    verify_manifest(root, final_report)
                     _assert_output_parent_unchanged(output, opened_parent)
                     _assert_published_archive(
                         output,
@@ -599,24 +524,19 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
                         expected_revision=published_archive,
                     )
                 except (DatasetError, OSError) as exc:
-                    rejected_name = _quarantine_release_archive(
-                        parent_fd,
-                        output,
-                        published_archive,
-                    )
                     if "output parent changed" in str(exc):
                         raise DatasetError(
                             "release output parent changed during publication; "
-                            f"published archive retained as {rejected_name} through the opened parent"
+                            "published name left untouched through the opened parent"
                         ) from exc
                     if "release archive changed" in str(exc):
                         raise DatasetError(
                             "release archive changed after final dataset validation; "
-                            f"rejected archive retained as {rejected_name}"
+                            "published name left untouched"
                         ) from exc
                     raise DatasetError(
                         "dataset changed after archive publication; "
-                        f"rejected archive retained as {rejected_name}"
+                        "published name left untouched"
                     ) from exc
             finally:
                 staged_stream.close()
