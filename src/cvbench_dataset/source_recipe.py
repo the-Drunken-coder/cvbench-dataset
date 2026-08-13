@@ -292,8 +292,11 @@ def hydrate_source_recipe(
     root = Path(root).resolve()
     source_dir = Path(source_dir).resolve()
     requested_output = Path(output)
-    if requested_output.exists() or requested_output.is_symlink():
-        raise DatasetError(f"hydrate target already exists: {requested_output}")
+    if requested_output.name in {"", ".", ".."}:
+        raise DatasetError(f"invalid hydrate target: {requested_output}")
+    output = requested_output.parent.resolve() / requested_output.name
+    if output.exists() or output.is_symlink():
+        raise DatasetError(f"hydrate target already exists: {output}")
     if not source_dir.is_dir() or source_dir.is_symlink():
         raise DatasetError(f"source directory must be a regular directory: {source_dir}")
     report = validate_source_recipe(root)
@@ -311,7 +314,6 @@ def hydrate_source_recipe(
         if sha256_file(path) != clip.source_sha256:
             raise DatasetError(f"source video hash mismatch: {path}")
 
-    output = requested_output.resolve()
     try:
         output.relative_to(root)
     except ValueError:

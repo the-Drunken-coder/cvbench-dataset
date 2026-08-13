@@ -385,6 +385,8 @@ def validate_dataset(root: str | Path, *, require_manifest: bool = True) -> Data
         if "config_file" in value
     }
     artifact_root = root / "artifacts"
+    if (artifact_root.exists() or artifact_root.is_symlink()) and not artifact_root.is_dir():
+        raise DatasetError("dataset artifacts entry must be a directory")
     actual_configs = (
         {
             path.relative_to(root).as_posix()

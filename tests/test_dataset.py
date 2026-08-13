@@ -295,6 +295,27 @@ def test_hydration_does_not_replace_target_created_during_build(
     assert (output / "owner.txt").read_text() == "preserve me\n"
 
 
+def test_hydration_does_not_follow_target_symlink_created_during_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    output = tmp_path / "hydrated"
+    redirected = tmp_path / "redirected"
+    validate_original = source_recipe_module.validate_source_recipe
+
+    def validate_then_create_symlink(root: Path):
+        report = validate_original(root)
+        if Path(root).resolve() == recipe.resolve():
+            output.symlink_to(redirected)
+        return report
+
+    monkeypatch.setattr(source_recipe_module, "validate_source_recipe", validate_then_create_symlink)
+    with pytest.raises(DatasetError, match="target already exists"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert output.is_symlink()
+    assert not redirected.exists()
+
+
 def test_hydration_publishes_complete_directory_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -386,6 +407,13 @@ def test_canonical_validation_rejects_unreferenced_config_artifact(tmp_path: Pat
     (output / "artifacts" / "orphan.json").write_text("{}\n")
     with pytest.raises(DatasetError, match="config artifacts mismatch"):
         validate_dataset(output)
+
+
+def test_canonical_validation_rejects_artifacts_file(tmp_path: Path) -> None:
+    dataset = _copy_sample(tmp_path)
+    (dataset / "artifacts").write_text("not a directory\n")
+    with pytest.raises(DatasetError, match="artifacts entry must be a directory"):
+        validate_dataset(dataset, require_manifest=False)
 
 
 def test_source_recipe_rejects_non_finite_confidence(tmp_path: Path) -> None:
