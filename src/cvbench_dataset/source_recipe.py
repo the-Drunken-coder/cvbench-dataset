@@ -572,13 +572,22 @@ def hydrate_source_recipe(
             if "target already exists" in str(exc):
                 raise
             raise DatasetError("hydrate staging directory changed during publication") from exc
-        published = os.stat(output.name, dir_fd=parent_fd, follow_symlinks=False)
+        try:
+            published = os.stat(output.name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise DatasetError(
+                "hydrate staging directory changed during publication and could not be quarantined"
+            ) from exc
         if (
             not stat.S_ISDIR(published.st_mode)
             or (published.st_dev, published.st_ino)
             != (staged_directory.st_dev, staged_directory.st_ino)
         ):
-            rejected_name = _quarantine_rejected_publication(parent_fd, output.name, published)
+            rejected_name = _quarantine_rejected_publication(
+                parent_fd,
+                output.name,
+                staged_directory,
+            )
             raise DatasetError(
                 "hydrate staging directory changed during publication; "
                 f"rejected content retained as {rejected_name}"
@@ -590,11 +599,10 @@ def hydrate_source_recipe(
             if published_report != hydrated or _recipe_inventory(published_root) != hydrated_inventory:
                 raise DatasetError("hydrated dataset changed during publication")
         except DatasetError as exc:
-            current_publication = os.stat(output.name, dir_fd=parent_fd, follow_symlinks=False)
             rejected_name = _quarantine_rejected_publication(
                 parent_fd,
                 output.name,
-                current_publication,
+                staged_directory,
             )
             raise DatasetError(
                 "hydrated dataset changed during publication; "
@@ -603,11 +611,10 @@ def hydrate_source_recipe(
         try:
             _assert_output_parent_unchanged(output, opened_parent)
         except DatasetError as exc:
-            current_publication = os.stat(output.name, dir_fd=parent_fd, follow_symlinks=False)
             rejected_name = _quarantine_rejected_publication(
                 parent_fd,
                 output.name,
-                current_publication,
+                staged_directory,
             )
             raise DatasetError(
                 "hydrate output parent changed during publication; "

@@ -762,6 +762,34 @@ def test_hydration_does_not_quarantine_replacement_content(
     assert displaced.is_dir()
 
 
+def test_hydration_rejects_replacement_before_publication_identity_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    rename_original = source_recipe_module._rename_no_replace
+    displaced = tmp_path / "displaced-valid-publication"
+    replaced = False
+
+    def publish_then_replace(source: Path, destination: Path, **kwargs) -> None:
+        nonlocal replaced
+        rename_original(source, destination, **kwargs)
+        if not replaced:
+            replaced = True
+            parent = source_recipe_module._directory_fd_path(kwargs["destination_dir_fd"])
+            current = parent / destination
+            current.rename(displaced)
+            current.mkdir()
+            (current / "owner.txt").write_text("unrelated replacement\n")
+
+    monkeypatch.setattr(source_recipe_module, "_rename_no_replace", publish_then_replace)
+    output = tmp_path / "hydrated"
+    with pytest.raises(DatasetError, match="could not be quarantined"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert (output / "owner.txt").read_text() == "unrelated replacement\n"
+    assert validate_dataset(displaced).id == "minimal-synthetic"
+    assert not list(tmp_path.glob(".hydrated.rejected-*"))
+
+
 def test_canonical_validation_rejects_config_artifact_drift(tmp_path: Path) -> None:
     recipe, source_dir = _source_recipe(tmp_path)
     output = tmp_path / "hydrated"
