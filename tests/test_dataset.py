@@ -387,6 +387,17 @@ def test_hydration_rejects_replaced_output_parent(
     assert not (moved_parent / "hydrated").exists()
 
 
+def test_hydration_rejects_symlinked_output_parent(tmp_path: Path) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    actual_parent = tmp_path / "actual-parent"
+    actual_parent.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(actual_parent, target_is_directory=True)
+    with pytest.raises(DatasetError, match="cannot anchor hydrate output parent"):
+        hydrate_source_recipe(recipe, source_dir, linked_parent / "hydrated")
+    assert not (actual_parent / "hydrated").exists()
+
+
 def test_hydration_rejects_replaced_staging_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

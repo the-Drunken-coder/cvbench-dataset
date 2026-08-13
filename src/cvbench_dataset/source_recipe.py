@@ -7,6 +7,7 @@ import shutil
 import stat
 import sys
 import uuid
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,23 @@ RECIPE_TOP_LEVEL_NAMES = {
 
 def _directory_anchored_publication_supported() -> bool:
     return sys.platform in {"darwin", "linux"}
+
+
+def _open_or_create_directory(path: Path) -> int:
+    """Traverse an absolute path without following replaceable symlinks."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(path.anchor, flags)
+    try:
+        for part in path.parts[1:]:
+            with suppress(FileExistsError):
+                os.mkdir(part, mode=0o700, dir_fd=directory_fd)
+            next_fd = os.open(part, flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return directory_fd
+    except OSError as exc:
+        os.close(directory_fd)
+        raise DatasetError(f"cannot anchor hydrate output parent {path}: {exc}") from exc
 
 
 def _directory_fd_path(directory_fd: int) -> Path:
@@ -349,7 +367,7 @@ def hydrate_source_recipe(
     requested_output = Path(output)
     if requested_output.name in {"", ".", ".."}:
         raise DatasetError(f"invalid hydrate target: {requested_output}")
-    output = requested_output.parent.resolve() / requested_output.name
+    output = Path(os.path.abspath(requested_output))
     if output.exists() or output.is_symlink():
         raise DatasetError(f"hydrate target already exists: {output}")
     if not source_dir.is_dir() or source_dir.is_symlink():
@@ -362,8 +380,7 @@ def hydrate_source_recipe(
         raise DatasetError("hydrate output must be outside the source recipe")
     if not _directory_anchored_publication_supported():
         raise DatasetError("directory-anchored hydrate publication is unsupported on this platform")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    parent_fd = os.open(output.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    parent_fd = _open_or_create_directory(output.parent)
     opened_parent = os.fstat(parent_fd)
     if (
         opened_parent.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
