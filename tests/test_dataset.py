@@ -1179,6 +1179,31 @@ def test_release_quarantines_archive_that_fails_post_rename_verification(
     assert rejected[0].read_bytes() == b"changed during publication"
 
 
+def test_release_detects_same_length_rewrite_after_hashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _copy_sample(tmp_path)
+    archive = tmp_path / "release.tar.gz"
+    hash_original = manifest_module._stream_sha256
+    mutated = False
+
+    def hash_then_rewrite(stream) -> str:
+        nonlocal mutated
+        digest = hash_original(stream)
+        if archive.exists() and not mutated:
+            body = archive.read_bytes()
+            archive.write_bytes(bytes([body[0] ^ 0xFF]) + body[1:])
+            mutated = True
+        return digest
+
+    monkeypatch.setattr(manifest_module, "_stream_sha256", hash_then_rewrite)
+    with pytest.raises(DatasetError, match="changed during publication"):
+        build_release(dataset, archive)
+    assert not archive.exists()
+    rejected = list(tmp_path.glob(".release.tar.gz.rejected-*"))
+    assert len(rejected) == 1
+
+
 def test_release_publication_stays_bound_to_opened_output_parent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

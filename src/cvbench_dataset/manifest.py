@@ -297,7 +297,8 @@ def _assert_published_archive(
     expected_sha256: str,
     *,
     parent_fd: int | None,
-) -> None:
+    expected_revision: os.stat_result | None = None,
+) -> os.stat_result:
     try:
         descriptor = os.open(
             output.name if parent_fd is not None else output,
@@ -305,8 +306,9 @@ def _assert_published_archive(
             dir_fd=parent_fd,
         )
         with os.fdopen(descriptor, "rb") as published_stream:
-            published = os.fstat(published_stream.fileno())
+            published_before = os.fstat(published_stream.fileno())
             published_sha256 = _stream_sha256(published_stream)
+            published_after = os.fstat(published_stream.fileno())
         rebound = os.stat(
             output.name if parent_fd is not None else output,
             dir_fd=parent_fd,
@@ -315,14 +317,25 @@ def _assert_published_archive(
     except OSError as exc:
         raise DatasetError("release archive changed during publication") from exc
     expected_identity = (expected_publication.st_dev, expected_publication.st_ino)
+    revision_baseline = expected_revision or published_before
+    expected_revision_values = (
+        revision_baseline.st_size,
+        revision_baseline.st_mtime_ns,
+        revision_baseline.st_ctime_ns,
+    )
     if (
-        (published.st_dev, published.st_ino) != expected_identity
-        or published.st_size != expected_publication.st_size
+        (published_before.st_dev, published_before.st_ino) != expected_identity
+        or (published_after.st_dev, published_after.st_ino) != expected_identity
         or published_sha256 != expected_sha256
         or (rebound.st_dev, rebound.st_ino) != expected_identity
-        or rebound.st_size != expected_publication.st_size
+        or any(
+            (candidate.st_size, candidate.st_mtime_ns, candidate.st_ctime_ns)
+            != expected_revision_values
+            for candidate in (published_before, published_after, rebound)
+        )
     ):
         raise DatasetError("release archive changed during publication")
+    return published_after
 
 
 def _publish_archive(
@@ -378,7 +391,7 @@ def _publish_archive(
                     expected_source=staged,
                 )
             renamed = True
-            _assert_published_archive(
+            published = _assert_published_archive(
                 output,
                 staged,
                 expected_sha256,
@@ -403,7 +416,7 @@ def _publish_archive(
                 "release archive changed during publication; "
                 f"rejected archive retained as {rejected_name}"
             ) from exc
-        return staged
+        return published
     finally:
         with suppress(FileNotFoundError):
             os.unlink(
@@ -533,6 +546,7 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
                         published_archive,
                         archive_sha256,
                         parent_fd=parent_fd,
+                        expected_revision=published_archive,
                     )
                 except (DatasetError, OSError) as exc:
                     rejected_name = _quarantine_release_archive(
