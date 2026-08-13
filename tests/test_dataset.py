@@ -680,6 +680,25 @@ def test_release_rejects_config_changed_after_snapshot(
     assert not archive.exists()
 
 
+def test_release_rejects_empty_directory_added_after_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _copy_sample(tmp_path)
+    copytree_original = manifest_module.shutil.copytree
+
+    def copy_then_add_directory(source_root: Path, snapshot: Path, *args, **kwargs):
+        result = copytree_original(source_root, snapshot, *args, **kwargs)
+        if Path(source_root).resolve() == dataset.resolve():
+            (dataset / "licenses" / "new-directory").mkdir()
+        return result
+
+    monkeypatch.setattr(manifest_module.shutil, "copytree", copy_then_add_directory)
+    archive = tmp_path / "release.tar.gz"
+    with pytest.raises(DatasetError, match="dataset changed during release build"):
+        build_release(dataset, archive)
+    assert not archive.exists()
+
+
 def test_build_release_fails_closed_for_noncertified_state(tmp_path: Path) -> None:
     dataset = _copy_sample(tmp_path)
     descriptor = yaml.safe_load((dataset / "dataset.yaml").read_text())

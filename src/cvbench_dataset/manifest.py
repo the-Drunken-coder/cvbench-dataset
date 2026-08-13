@@ -55,6 +55,18 @@ def _release_files(root: Path) -> list[Path]:
     return sorted(files, key=lambda path: path.relative_to(root).as_posix())
 
 
+def _release_inventory(root: Path) -> list[tuple[str, str]]:
+    """Describe every archived path except the generated root manifest."""
+    inventory = []
+    for path in root.rglob("*"):
+        relative = path.relative_to(root).as_posix()
+        if relative == MANIFEST_NAME:
+            continue
+        kind = "symlink" if path.is_symlink() else "directory" if path.is_dir() else "file"
+        inventory.append((relative, kind))
+    return sorted(inventory)
+
+
 def make_manifest(root: Path, report: DatasetReport) -> dict[str, Any]:
     descriptor = load_descriptor(root)
     if report.state != "certified":
@@ -203,6 +215,7 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f".{output.name}.", dir=output.parent) as temporary:
         snapshot = Path(temporary) / "dataset"
+
         def ignore_root_manifest(directory: str, names: list[str]) -> set[str]:
             if Path(directory).resolve() == root and MANIFEST_NAME in names:
                 return {MANIFEST_NAME}
@@ -220,7 +233,10 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
         _write_archive(snapshot, f"{report.id}-{report.version}", staged_archive)
 
         current_report = validate_dataset(root, require_manifest=False)
-        if make_manifest(root, current_report) != manifest:
+        if (
+            make_manifest(root, current_report) != manifest
+            or _release_inventory(root) != _release_inventory(snapshot)
+        ):
             raise DatasetError("dataset changed during release build")
         _write_atomic(root / MANIFEST_NAME, manifest_body)
         verify_manifest(root)
