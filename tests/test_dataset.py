@@ -614,8 +614,14 @@ def test_hydration_detects_staging_swap_during_rename(
 ) -> None:
     recipe, source_dir = _source_recipe(tmp_path)
     rename_original = source_recipe_module._rename_no_replace
+    swapped = False
 
     def swap_then_rename(source: Path, destination: Path, **kwargs) -> None:
+        nonlocal swapped
+        if swapped:
+            rename_original(source, destination, **kwargs)
+            return
+        swapped = True
         parent = source_recipe_module._directory_fd_path(kwargs["source_dir_fd"])
         staging = parent / source
         stolen = parent / f"{source}.stolen"
@@ -628,7 +634,58 @@ def test_hydration_detects_staging_swap_during_rename(
     output = tmp_path / "hydrated"
     with pytest.raises(DatasetError, match="staging directory changed during publication"):
         hydrate_source_recipe(recipe, source_dir, output)
-    assert output.exists()
+    assert not output.exists()
+    rejected = list(tmp_path.glob(".hydrated.rejected-*"))
+    assert len(rejected) == 1
+    assert (rejected[0] / "clips" / "synthetic-clip" / "video.mp4").read_bytes() == b"replacement"
+
+
+def test_hydration_rechecks_requested_parent_after_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    parent = tmp_path / "publish"
+    parent.mkdir()
+    output = parent / "hydrated"
+    moved_parent = tmp_path / "moved-publish"
+    rename_original = source_recipe_module._rename_no_replace
+
+    def publish_then_move_parent(source: Path, destination: Path, **kwargs) -> None:
+        rename_original(source, destination, **kwargs)
+        parent.rename(moved_parent)
+        parent.mkdir()
+
+    monkeypatch.setattr(source_recipe_module, "_rename_no_replace", publish_then_move_parent)
+    with pytest.raises(DatasetError, match="output parent changed during publication"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
+    assert (moved_parent / "hydrated").is_dir()
+
+
+def test_hydration_quarantines_content_mutated_during_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    rename_original = source_recipe_module._rename_no_replace
+    mutated = False
+
+    def publish_then_mutate(source: Path, destination: Path, **kwargs) -> None:
+        nonlocal mutated
+        rename_original(source, destination, **kwargs)
+        if not mutated:
+            mutated = True
+            parent = source_recipe_module._directory_fd_path(kwargs["destination_dir_fd"])
+            (parent / destination / "clips" / "synthetic-clip" / "video.mp4").write_bytes(
+                b"replacement"
+            )
+
+    monkeypatch.setattr(source_recipe_module, "_rename_no_replace", publish_then_mutate)
+    output = tmp_path / "hydrated"
+    with pytest.raises(DatasetError, match="hydrated dataset changed during publication"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
+    rejected = list(tmp_path.glob(".hydrated.rejected-*"))
+    assert len(rejected) == 1
 
 
 def test_canonical_validation_rejects_config_artifact_drift(tmp_path: Path) -> None:

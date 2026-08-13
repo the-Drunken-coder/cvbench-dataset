@@ -168,6 +168,35 @@ def _assert_hydrated_recipe_constraints(
             raise DatasetError("hydrated dataset violates source recipe constraints")
 
 
+def _assert_output_parent_unchanged(output: Path, opened_parent: os.stat_result) -> None:
+    try:
+        current_parent = os.stat(output.parent, follow_symlinks=False)
+    except FileNotFoundError as exc:
+        raise DatasetError("hydrate output parent changed during publication") from exc
+    if (
+        not stat.S_ISDIR(current_parent.st_mode)
+        or (current_parent.st_dev, current_parent.st_ino)
+        != (opened_parent.st_dev, opened_parent.st_ino)
+    ):
+        raise DatasetError("hydrate output parent changed during publication")
+
+
+def _quarantine_rejected_publication(parent_fd: int, output_name: str) -> str:
+    rejected_name = f".{output_name}.rejected-{uuid.uuid4().hex}"
+    try:
+        _rename_no_replace(
+            Path(output_name),
+            Path(rejected_name),
+            source_dir_fd=parent_fd,
+            destination_dir_fd=parent_fd,
+        )
+    except DatasetError as exc:
+        raise DatasetError(
+            "hydrate staging directory changed during publication and could not be quarantined"
+        ) from exc
+    return rejected_name
+
+
 def _load_source_lock(root: Path) -> dict[str, Any]:
     path = root / "source-lock.json"
     value = _load_json(path)
@@ -486,16 +515,7 @@ def hydrate_source_recipe(
             if sha256_file(copied_video) != clip.source_sha256:
                 raise DatasetError(f"source video changed during hydration: {clip.source_filename}")
         hydrated = validate_dataset(temporary).to_dict()
-        try:
-            current_parent = os.stat(output.parent, follow_symlinks=False)
-        except FileNotFoundError as exc:
-            raise DatasetError("hydrate output parent changed during publication") from exc
-        if (
-            not stat.S_ISDIR(current_parent.st_mode)
-            or (current_parent.st_dev, current_parent.st_ino)
-            != (opened_parent.st_dev, opened_parent.st_ino)
-        ):
-            raise DatasetError("hydrate output parent changed during publication")
+        _assert_output_parent_unchanged(output, opened_parent)
         try:
             current_staging = os.stat(
                 temporary_name,
@@ -528,12 +548,24 @@ def hydrate_source_recipe(
             or (published.st_dev, published.st_ino)
             != (staged_directory.st_dev, staged_directory.st_ino)
         ):
-            raise DatasetError("hydrate staging directory changed during publication")
+            rejected_name = _quarantine_rejected_publication(parent_fd, output.name)
+            raise DatasetError(
+                "hydrate staging directory changed during publication; "
+                f"rejected content retained as {rejected_name}"
+            )
         published_root = _directory_fd_path(parent_fd) / output.name
-        published_report = validate_dataset(published_root).to_dict()
-        _assert_hydrated_recipe_constraints(published_root, copied_report, published_report)
-        if published_report != hydrated or _recipe_inventory(published_root) != hydrated_inventory:
-            raise DatasetError("hydrated dataset changed during publication")
+        try:
+            published_report = validate_dataset(published_root).to_dict()
+            _assert_hydrated_recipe_constraints(published_root, copied_report, published_report)
+            if published_report != hydrated or _recipe_inventory(published_root) != hydrated_inventory:
+                raise DatasetError("hydrated dataset changed during publication")
+        except DatasetError as exc:
+            rejected_name = _quarantine_rejected_publication(parent_fd, output.name)
+            raise DatasetError(
+                "hydrated dataset changed during publication; "
+                f"rejected content retained as {rejected_name}"
+            ) from exc
+        _assert_output_parent_unchanged(output, opened_parent)
     finally:
         os.close(parent_fd)
     return hydrated
