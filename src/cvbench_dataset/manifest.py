@@ -457,6 +457,42 @@ def _quarantine_release_archive(
     return str(destination)
 
 
+def _probe_archive_publication(output: Path, parent_fd: int) -> None:
+    """Prove the output filesystem supports the bound no-replace rename."""
+    source_name = f".{output.name}.probe-{uuid.uuid4().hex}"
+    destination_name = f"{source_name}.published"
+    try:
+        descriptor = os.open(
+            source_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=parent_fd,
+        )
+        with os.fdopen(descriptor, "wb") as probe:
+            probe.write(b"cvbench release publication probe\n")
+            probe.flush()
+            os.fsync(probe.fileno())
+            expected = os.fstat(probe.fileno())
+        _rename_no_replace(
+            Path(source_name),
+            Path(destination_name),
+            source_dir_fd=parent_fd,
+            destination_dir_fd=parent_fd,
+            expected_source=expected,
+        )
+        published = os.stat(destination_name, dir_fd=parent_fd, follow_symlinks=False)
+        if (published.st_dev, published.st_ino) != (expected.st_dev, expected.st_ino):
+            raise DatasetError("release publication probe changed during rename")
+    except (DatasetError, OSError) as exc:
+        raise DatasetError(
+            "directory-anchored release publication is unsupported for the output parent"
+        ) from exc
+    finally:
+        for name in (source_name, destination_name):
+            with suppress(FileNotFoundError):
+                os.unlink(name, dir_fd=parent_fd)
+
+
 def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
     root = Path(root).resolve()
     output = Path(output).resolve()
@@ -472,6 +508,13 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
     parent_fd = _open_directory(output.parent)
     opened_parent = os.fstat(parent_fd)
     try:
+        try:
+            os.stat(output.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise DatasetError(f"release archive already exists: {output}")
+        _probe_archive_publication(output, parent_fd)
         with tempfile.TemporaryDirectory(prefix=f"cvbench-{output.name}.") as temporary:
             snapshot = Path(temporary) / "dataset"
 

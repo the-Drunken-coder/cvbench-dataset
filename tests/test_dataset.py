@@ -1211,22 +1211,21 @@ def test_release_publication_stays_bound_to_opened_output_parent(
     parent = tmp_path / "publish"
     parent.mkdir()
     output = parent / "release.tar.gz"
-    output.write_bytes(b"existing archive")
     moved_parent = tmp_path / "moved-publish"
-    publish_original = manifest_module._publish_archive
+    probe_original = manifest_module._probe_archive_publication
 
-    def move_parent_before_publish(stream, output: Path, expected_sha256: str, **kwargs) -> None:
+    def probe_then_move_parent(output: Path, parent_fd: int) -> None:
+        probe_original(output, parent_fd)
         parent.rename(moved_parent)
         parent.mkdir()
         (parent / "owner.txt").write_text("replacement parent\n")
-        publish_original(stream, output, expected_sha256, **kwargs)
 
-    monkeypatch.setattr(manifest_module, "_publish_archive", move_parent_before_publish)
+    monkeypatch.setattr(manifest_module, "_probe_archive_publication", probe_then_move_parent)
     with pytest.raises(DatasetError, match="output parent changed during publication"):
         build_release(dataset, output)
     assert not output.exists()
     assert (parent / "owner.txt").read_text() == "replacement parent\n"
-    assert (moved_parent / "release.tar.gz").read_bytes() == b"existing archive"
+    assert not (moved_parent / "release.tar.gz").exists()
 
 
 def test_failed_release_quarantines_archive_in_detached_parent(
@@ -1334,6 +1333,34 @@ def test_build_release_rejects_unsupported_platform_before_mutation(
     }
     assert after == before
     assert not output.parent.exists()
+
+
+def test_build_release_probes_output_rename_before_dataset_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _copy_sample(tmp_path)
+    before = {
+        path.relative_to(dataset): path.read_bytes()
+        for path in dataset.rglob("*")
+        if path.is_file()
+    }
+    output = tmp_path / "release.tar.gz"
+
+    def unsupported_rename(*args, **kwargs) -> None:
+        raise DatasetError("atomic no-replace publication is unsupported")
+
+    monkeypatch.setattr(manifest_module, "_rename_no_replace", unsupported_rename)
+    with pytest.raises(DatasetError, match="unsupported for the output parent"):
+        build_release(dataset, output)
+
+    after = {
+        path.relative_to(dataset): path.read_bytes()
+        for path in dataset.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert not output.exists()
+    assert not list(tmp_path.glob(".release.tar.gz.probe-*"))
 
 
 def test_build_release_fails_closed_for_noncertified_state(tmp_path: Path) -> None:
