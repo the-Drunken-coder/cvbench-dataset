@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import tarfile
 import zipfile
@@ -265,6 +266,30 @@ def test_source_recipe_rejects_schema_directory(tmp_path: Path) -> None:
     schema.mkdir()
     with pytest.raises(DatasetError, match="canonical schema must be a regular file"):
         validate_source_recipe(recipe)
+
+
+def test_hydration_rejects_recipe_symlink_before_inventorying_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    config = recipe / "artifacts" / "synthetic-model-config.json"
+    external = tmp_path / "external.json"
+    external.write_text('{"outside":true}\n')
+    config.unlink()
+    try:
+        config.symlink_to(external)
+    except OSError:
+        pytest.skip("symlinks are unavailable on this platform")
+
+    monkeypatch.setattr(
+        source_recipe_module,
+        "sha256_file",
+        lambda path: pytest.fail(f"unsafe recipe entry was hashed: {path}"),
+    )
+    output = tmp_path / "hydrated"
+    with pytest.raises(DatasetError, match="cannot contain symlinks"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
 
 
 def test_source_recipe_rejects_conflicting_hashes_for_one_filename(tmp_path: Path) -> None:
@@ -796,6 +821,35 @@ def test_hydration_rejects_replacement_before_publication_identity_check(
     assert (output / "owner.txt").read_text() == "unrelated replacement\n"
     assert validate_dataset(displaced).id == "minimal-synthetic"
     assert not list(tmp_path.glob(".hydrated.rejected-*"))
+
+
+def test_hydration_rebinds_published_name_after_final_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    output = tmp_path / "hydrated"
+    displaced = tmp_path / "displaced-final-publication"
+    check_parent_original = source_recipe_module._assert_output_parent_unchanged
+    replaced = False
+
+    def check_parent_then_replace(path: Path, opened_parent: os.stat_result) -> None:
+        nonlocal replaced
+        check_parent_original(path, opened_parent)
+        if path.exists() and not replaced:
+            replaced = True
+            path.rename(displaced)
+            path.mkdir()
+            (path / "owner.txt").write_text("unrelated replacement\n")
+
+    monkeypatch.setattr(
+        source_recipe_module,
+        "_assert_output_parent_unchanged",
+        check_parent_then_replace,
+    )
+    with pytest.raises(DatasetError, match="published name changed"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert (output / "owner.txt").read_text() == "unrelated replacement\n"
+    assert validate_dataset(displaced).id == "minimal-synthetic"
 
 
 def test_canonical_validation_rejects_config_artifact_drift(tmp_path: Path) -> None:

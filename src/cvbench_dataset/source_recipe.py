@@ -189,6 +189,28 @@ def _assert_output_parent_unchanged(output: Path, opened_parent: os.stat_result)
         raise DatasetError("hydrate output parent changed during publication")
 
 
+def _assert_published_output(
+    parent_fd: int,
+    output_name: str,
+    expected_publication: os.stat_result,
+) -> os.stat_result:
+    try:
+        published = os.stat(output_name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise DatasetError(
+            "hydrate published name changed during publication; output left untouched"
+        ) from exc
+    if (
+        not stat.S_ISDIR(published.st_mode)
+        or (published.st_dev, published.st_ino)
+        != (expected_publication.st_dev, expected_publication.st_ino)
+    ):
+        raise DatasetError(
+            "hydrate published name changed during publication; output left untouched"
+        )
+    return published
+
+
 def _load_source_lock(root: Path) -> dict[str, Any]:
     path = root / "source-lock.json"
     value = _load_json(path)
@@ -237,6 +259,7 @@ def _assert_recipe_layout(root: Path, declared_clips: list[dict[str, Any]]) -> N
 
 
 def _recipe_inventory(root: Path) -> dict[str, str]:
+    _assert_safe_tree(root)
     return {
         path.relative_to(root).as_posix(): "directory" if path.is_dir() else sha256_file(path)
         for path in sorted(root.rglob("*"))
@@ -414,8 +437,8 @@ def hydrate_source_recipe(
 ) -> dict[str, Any]:
     root = Path(root).resolve()
     source_dir = Path(source_dir).resolve()
-    source_inventory = _recipe_inventory(root)
     source_report = validate_source_recipe(root)
+    source_inventory = _recipe_inventory(root)
     if _recipe_inventory(root) != source_inventory:
         raise DatasetError("source recipe changed during hydration")
     requested_output = Path(output)
@@ -565,20 +588,7 @@ def hydrate_source_recipe(
             if "target already exists" in str(exc):
                 raise
             raise DatasetError("hydrate staging directory changed during publication") from exc
-        try:
-            published = os.stat(output.name, dir_fd=parent_fd, follow_symlinks=False)
-        except OSError as exc:
-            raise DatasetError(
-                "hydrate published name changed during publication; output left untouched"
-            ) from exc
-        if (
-            not stat.S_ISDIR(published.st_mode)
-            or (published.st_dev, published.st_ino)
-            != (staged_directory.st_dev, staged_directory.st_ino)
-        ):
-            raise DatasetError(
-                "hydrate published name changed during publication; output left untouched"
-            )
+        _assert_published_output(parent_fd, output.name, staged_directory)
         published_root = _directory_fd_path(parent_fd) / output.name
         try:
             published_report = validate_dataset(published_root).to_dict()
@@ -599,6 +609,7 @@ def hydrate_source_recipe(
                 "hydrate output parent changed during publication; "
                 "published content left untouched through the opened parent"
             ) from exc
+        _assert_published_output(parent_fd, output.name, staged_directory)
     finally:
         os.close(parent_fd)
     return hydrated
