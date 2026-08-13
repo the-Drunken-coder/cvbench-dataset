@@ -135,6 +135,12 @@ def _assert_recipe_layout(root: Path, declared_clips: list[dict[str, Any]]) -> N
             f"source recipe must contain exactly {sorted(RECIPE_TOP_LEVEL_NAMES)}, "
             f"found {sorted(actual_top_level)}"
         )
+    for name in ("artifacts", "clips", "licenses", "schemas"):
+        if not (root / name).is_dir():
+            raise DatasetError(f"source recipe {name} must be a directory")
+    for name in ("README.md", "dataset.yaml", "source-lock.json"):
+        if not (root / name).is_file():
+            raise DatasetError(f"source recipe {name} must be a file")
     expected_ids = {clip["id"] for clip in declared_clips}
     actual_ids = {path.name for path in (root / "clips").iterdir()}
     if actual_ids != expected_ids:
@@ -157,6 +163,14 @@ def _assert_recipe_layout(root: Path, declared_clips: list[dict[str, Any]]) -> N
             )
         if not all((clip_root / name).is_file() for name in RECIPE_CLIP_FILENAMES):
             raise DatasetError(f"{expected_path} contains a non-file canonical artifact")
+
+
+def _recipe_hash_inventory(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): sha256_file(path)
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
 
 
 def _validate_config_artifact(root: Path, value: dict[str, Any], context: str) -> str:
@@ -321,6 +335,7 @@ def hydrate_source_recipe(
     if not source_dir.is_dir() or source_dir.is_symlink():
         raise DatasetError(f"source directory must be a regular directory: {source_dir}")
     report = validate_source_recipe(root)
+    recipe_hashes = _recipe_hash_inventory(root)
     expected_filenames = {clip.source_filename for clip in report.clips}
     actual_videos = {path.name for path in source_dir.iterdir() if path.suffix.lower() == ".mp4"}
     if actual_videos != expected_filenames:
@@ -375,7 +390,7 @@ def hydrate_source_recipe(
             else:
                 shutil.copy2(source, destination)
         copied_report = validate_source_recipe(temporary)
-        if copied_report != report:
+        if copied_report != report or _recipe_hash_inventory(temporary) != recipe_hashes:
             raise DatasetError("source recipe changed during hydration")
         (temporary / "README.md").unlink()
         (temporary / "source-lock.json").unlink()

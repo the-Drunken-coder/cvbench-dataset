@@ -239,6 +239,16 @@ def test_source_recipe_rejects_media_drift_without_partial_output(tmp_path: Path
     assert not output.exists()
 
 
+@pytest.mark.parametrize("container", ["artifacts", "clips", "licenses", "schemas"])
+def test_source_recipe_rejects_non_directory_containers(tmp_path: Path, container: str) -> None:
+    recipe, _ = _source_recipe(tmp_path)
+    path = recipe / container
+    shutil.rmtree(path)
+    path.write_text("not a directory\n")
+    with pytest.raises(DatasetError, match=f"{container} must be a directory"):
+        validate_source_recipe(recipe)
+
+
 def test_source_recipe_rejects_non_string_lock_id(tmp_path: Path) -> None:
     recipe, _ = _source_recipe(tmp_path)
     source_lock = json.loads((recipe / "source-lock.json").read_text())
@@ -413,6 +423,32 @@ def test_hydration_revalidates_copied_recipe(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setattr(source_recipe_module.shutil, "copytree", mutate_recipe_then_copy)
     output = tmp_path / "hydrated"
     with pytest.raises(DatasetError, match="model-derived"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
+
+
+def test_hydration_binds_complete_recipe_hash_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    clips = recipe / "clips"
+    tracks = clips / "synthetic-clip" / "tracks.jsonl"
+    copytree_original = source_recipe_module.shutil.copytree
+
+    def mutate_valid_tracks_then_copy(source: Path, destination: Path, *args, **kwargs):
+        if Path(source) == clips:
+            rows = [json.loads(line) for line in tracks.read_text().splitlines()]
+            rows[0]["bbox_xyxy"][0] += 0.25
+            tracks.write_text(
+                "".join(
+                    json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n" for row in rows
+                )
+            )
+        return copytree_original(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(source_recipe_module.shutil, "copytree", mutate_valid_tracks_then_copy)
+    output = tmp_path / "hydrated"
+    with pytest.raises(DatasetError, match="source recipe changed"):
         hydrate_source_recipe(recipe, source_dir, output)
     assert not output.exists()
 
