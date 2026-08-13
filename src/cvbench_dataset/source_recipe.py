@@ -168,11 +168,11 @@ def _assert_recipe_layout(root: Path, declared_clips: list[dict[str, Any]]) -> N
             raise DatasetError(f"{expected_path} contains a non-file canonical artifact")
 
 
-def _recipe_hash_inventory(root: Path) -> dict[str, str]:
+def _recipe_inventory(root: Path) -> dict[str, str]:
     return {
-        path.relative_to(root).as_posix(): sha256_file(path)
+        path.relative_to(root).as_posix(): "directory" if path.is_dir() else sha256_file(path)
         for path in sorted(root.rglob("*"))
-        if path.is_file()
+        if path.is_dir() or path.is_file()
     }
 
 
@@ -307,10 +307,27 @@ def validate_source_recipe(root: str | Path) -> SourceRecipeReport:
         for path in (root / "artifacts").rglob("*")
         if path.is_file()
     }
+    actual_config_directories = {
+        path.relative_to(root).as_posix()
+        for path in ((root / "artifacts"), *(root / "artifacts").rglob("*"))
+        if path.is_dir()
+    }
+    expected_config_directories = {
+        parent.as_posix()
+        for relative in referenced_configs
+        for parent in Path(relative).parents
+        if parent != Path(".")
+    }
     if actual_configs != referenced_configs:
         raise DatasetError(
             f"source recipe config artifacts mismatch: expected {sorted(referenced_configs)}, "
             f"found {sorted(actual_configs)}"
+        )
+    if actual_config_directories != expected_config_directories:
+        raise DatasetError(
+            "source recipe config artifact directories mismatch: "
+            f"expected {sorted(expected_config_directories)}, "
+            f"found {sorted(actual_config_directories)}"
         )
     return SourceRecipeReport(
         id=descriptor["id"],
@@ -337,22 +354,6 @@ def hydrate_source_recipe(
         raise DatasetError(f"hydrate target already exists: {output}")
     if not source_dir.is_dir() or source_dir.is_symlink():
         raise DatasetError(f"source directory must be a regular directory: {source_dir}")
-    report = validate_source_recipe(root)
-    recipe_hashes = _recipe_hash_inventory(root)
-    expected_filenames = {clip.source_filename for clip in report.clips}
-    actual_videos = {path.name for path in source_dir.iterdir() if path.suffix.lower() == ".mp4"}
-    if actual_videos != expected_filenames:
-        raise DatasetError(
-            f"source video inventory mismatch: expected {sorted(expected_filenames)}, "
-            f"found {sorted(actual_videos)}"
-        )
-    for clip in report.clips:
-        path = source_dir / clip.source_filename
-        if path.is_symlink() or not path.is_file():
-            raise DatasetError(f"source video must be a regular file: {path}")
-        if sha256_file(path) != clip.source_sha256:
-            raise DatasetError(f"source video hash mismatch: {path}")
-
     try:
         output.relative_to(root)
     except ValueError:
@@ -389,23 +390,45 @@ def hydrate_source_recipe(
     temporary = _directory_fd_path(parent_fd) / temporary_name
     cleanup_staging = True
     try:
-        for name in (
-            "README.md",
-            "artifacts",
-            "dataset.yaml",
-            "licenses",
-            "schemas",
-            "clips",
-            "source-lock.json",
-        ):
-            source = root / name
-            destination = temporary / name
-            if source.is_dir():
-                shutil.copytree(source, destination)
-            else:
-                shutil.copy2(source, destination)
+        try:
+            for name in (
+                "README.md",
+                "artifacts",
+                "dataset.yaml",
+                "licenses",
+                "schemas",
+                "clips",
+                "source-lock.json",
+            ):
+                source = root / name
+                destination = temporary / name
+                if source.is_dir():
+                    shutil.copytree(source, destination)
+                else:
+                    shutil.copy2(source, destination)
+        except (OSError, shutil.Error) as exc:
+            raise DatasetError(f"cannot snapshot source recipe: {exc}") from exc
+        snapshot_inventory = _recipe_inventory(temporary)
         copied_report = validate_source_recipe(temporary)
-        if copied_report != report or _recipe_hash_inventory(temporary) != recipe_hashes:
+        if _recipe_inventory(temporary) != snapshot_inventory:
+            raise DatasetError("source recipe changed during hydration")
+        expected_filenames = {clip.source_filename for clip in copied_report.clips}
+        actual_videos = {path.name for path in source_dir.iterdir() if path.suffix.lower() == ".mp4"}
+        if actual_videos != expected_filenames:
+            raise DatasetError(
+                f"source video inventory mismatch: expected {sorted(expected_filenames)}, "
+                f"found {sorted(actual_videos)}"
+            )
+        for clip in copied_report.clips:
+            path = source_dir / clip.source_filename
+            if path.is_symlink() or not path.is_file():
+                raise DatasetError(f"source video must be a regular file: {path}")
+            if sha256_file(path) != clip.source_sha256:
+                raise DatasetError(f"source video hash mismatch: {path}")
+        if (
+            validate_source_recipe(temporary) != copied_report
+            or _recipe_inventory(temporary) != snapshot_inventory
+        ):
             raise DatasetError("source recipe changed during hydration")
         (temporary / "README.md").unlink()
         (temporary / "source-lock.json").unlink()

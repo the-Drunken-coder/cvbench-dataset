@@ -403,10 +403,31 @@ def validate_dataset(root: str | Path, *, require_manifest: bool = True) -> Data
         if artifact_root.is_dir()
         else set()
     )
+    actual_config_directories = (
+        {
+            path.relative_to(root).as_posix()
+            for path in (artifact_root, *artifact_root.rglob("*"))
+            if path.is_dir()
+        }
+        if artifact_root.is_dir()
+        else set()
+    )
+    expected_config_directories = {
+        parent.as_posix()
+        for relative in referenced_configs
+        for parent in Path(relative).parents
+        if parent != Path(".")
+    }
     if actual_configs != referenced_configs:
         raise DatasetError(
             "dataset config artifacts mismatch: "
             f"referenced {sorted(referenced_configs)}, found {sorted(actual_configs)}"
+        )
+    if actual_config_directories != expected_config_directories:
+        raise DatasetError(
+            "dataset config artifact directories mismatch: "
+            f"expected {sorted(expected_config_directories)}, "
+            f"found {sorted(actual_config_directories)}"
         )
     origins: Counter[str] = Counter()
     for clip in clips:

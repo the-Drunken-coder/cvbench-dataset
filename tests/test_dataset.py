@@ -321,11 +321,14 @@ def test_hydration_does_not_follow_target_symlink_created_during_build(
     output = tmp_path / "hydrated"
     redirected = tmp_path / "redirected"
     validate_original = source_recipe_module.validate_source_recipe
+    created = False
 
     def validate_then_create_symlink(root: Path):
+        nonlocal created
         report = validate_original(root)
-        if Path(root).resolve() == recipe.resolve():
+        if Path(root).resolve() != recipe.resolve() and not created:
             output.symlink_to(redirected)
+            created = True
         return report
 
     monkeypatch.setattr(source_recipe_module, "validate_source_recipe", validate_then_create_symlink)
@@ -486,16 +489,18 @@ def test_hydration_revalidates_copied_recipe(tmp_path: Path, monkeypatch: pytest
     assert not output.exists()
 
 
-def test_hydration_binds_complete_recipe_hash_inventory(
+def test_hydration_binds_complete_snapshot_inventory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     recipe, source_dir = _source_recipe(tmp_path)
-    clips = recipe / "clips"
-    tracks = clips / "synthetic-clip" / "tracks.jsonl"
-    copytree_original = source_recipe_module.shutil.copytree
+    inventory_original = source_recipe_module._recipe_inventory
+    mutated = False
 
-    def mutate_valid_tracks_then_copy(source: Path, destination: Path, *args, **kwargs):
-        if Path(source) == clips:
+    def inventory_then_mutate(root: Path):
+        nonlocal mutated
+        inventory = inventory_original(root)
+        if Path(root).resolve() != recipe.resolve() and not mutated:
+            tracks = Path(root) / "clips" / "synthetic-clip" / "tracks.jsonl"
             rows = [json.loads(line) for line in tracks.read_text().splitlines()]
             rows[0]["bbox_xyxy"][0] += 0.25
             tracks.write_text(
@@ -503,9 +508,10 @@ def test_hydration_binds_complete_recipe_hash_inventory(
                     json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n" for row in rows
                 )
             )
-        return copytree_original(source, destination, *args, **kwargs)
+            mutated = True
+        return inventory
 
-    monkeypatch.setattr(source_recipe_module.shutil, "copytree", mutate_valid_tracks_then_copy)
+    monkeypatch.setattr(source_recipe_module, "_recipe_inventory", inventory_then_mutate)
     output = tmp_path / "hydrated"
     with pytest.raises(DatasetError, match="source recipe changed"):
         hydrate_source_recipe(recipe, source_dir, output)
@@ -528,6 +534,13 @@ def test_canonical_validation_rejects_unreferenced_config_artifact(tmp_path: Pat
     (output / "artifacts" / "orphan.json").write_text("{}\n")
     with pytest.raises(DatasetError, match="config artifacts mismatch"):
         validate_dataset(output)
+
+
+def test_canonical_validation_rejects_empty_artifact_directories(tmp_path: Path) -> None:
+    dataset = _copy_sample(tmp_path)
+    (dataset / "artifacts" / "empty").mkdir(parents=True)
+    with pytest.raises(DatasetError, match="config artifact directories mismatch"):
+        validate_dataset(dataset, require_manifest=False)
 
 
 def test_canonical_validation_rejects_artifacts_file(tmp_path: Path) -> None:
