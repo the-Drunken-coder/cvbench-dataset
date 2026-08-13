@@ -7,11 +7,14 @@ import os
 import shutil
 import tarfile
 import tempfile
+import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, BinaryIO
 
 from .errors import DatasetError
 from .schema import validate_schema
+from .source_recipe import _assert_output_parent_unchanged, _open_directory
 from .validator import DatasetReport, load_descriptor, sha256_file, validate_dataset
 
 MANIFEST_NAME = "release-manifest.json"
@@ -272,9 +275,27 @@ def _stream_sha256(stream: BinaryIO) -> str:
     return digest.hexdigest()
 
 
-def _publish_archive(stream: BinaryIO, output: Path, expected_sha256: str) -> None:
-    descriptor, temporary_name = tempfile.mkstemp(dir=output.parent, prefix=f".{output.name}.")
-    temporary = Path(temporary_name)
+def _publish_archive(
+    stream: BinaryIO,
+    output: Path,
+    expected_sha256: str,
+    *,
+    parent_fd: int | None = None,
+) -> None:
+    temporary_name = f".{output.name}.{uuid.uuid4().hex}"
+    if parent_fd is None:
+        descriptor = os.open(
+            output.parent / temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+    else:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=parent_fd,
+        )
     try:
         stream.seek(0)
         digest = hashlib.sha256()
@@ -287,17 +308,48 @@ def _publish_archive(stream: BinaryIO, output: Path, expected_sha256: str) -> No
             staged = os.fstat(destination.fileno())
         if digest.hexdigest() != expected_sha256:
             raise DatasetError("staged release archive changed before publication")
-        current = temporary.stat(follow_symlinks=False)
+        current = os.stat(
+            temporary_name if parent_fd is not None else output.parent / temporary_name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
         if (current.st_dev, current.st_ino) != (staged.st_dev, staged.st_ino):
             raise DatasetError("staged release archive changed before publication")
-        os.replace(temporary, output)
-        published = output.stat(follow_symlinks=False)
-        if (published.st_dev, published.st_ino) != (staged.st_dev, staged.st_ino):
-            raise DatasetError("release archive changed during publication")
-        if sha256_file(output) != expected_sha256:
+        try:
+            if parent_fd is None:
+                os.replace(output.parent / temporary_name, output)
+                published_descriptor = os.open(
+                    output,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                )
+            else:
+                os.replace(
+                    temporary_name,
+                    output.name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                )
+                published_descriptor = os.open(
+                    output.name,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+        except OSError as exc:
+            raise DatasetError("release archive changed during publication") from exc
+        with os.fdopen(published_descriptor, "rb") as published_stream:
+            published = os.fstat(published_stream.fileno())
+            published_sha256 = _stream_sha256(published_stream)
+        if (
+            (published.st_dev, published.st_ino) != (staged.st_dev, staged.st_ino)
+            or published_sha256 != expected_sha256
+        ):
             raise DatasetError("release archive changed during publication")
     finally:
-        temporary.unlink(missing_ok=True)
+        with suppress(FileNotFoundError):
+            os.unlink(
+                temporary_name if parent_fd is not None else output.parent / temporary_name,
+                dir_fd=parent_fd,
+            )
 
 
 def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
@@ -310,61 +362,75 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
     else:
         raise DatasetError("release archive output must be outside the dataset root")
     output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=f".{output.name}.", dir=output.parent) as temporary:
-        snapshot = Path(temporary) / "dataset"
+    parent_fd = _open_directory(output.parent)
+    opened_parent = os.fstat(parent_fd)
+    try:
+        with tempfile.TemporaryDirectory(prefix=f"cvbench-{output.name}.") as temporary:
+            snapshot = Path(temporary) / "dataset"
 
-        def ignore_root_manifest(directory: str, names: list[str]) -> set[str]:
-            if Path(directory).resolve() == root and MANIFEST_NAME in names:
-                return {MANIFEST_NAME}
-            return set()
+            def ignore_root_manifest(directory: str, names: list[str]) -> set[str]:
+                if Path(directory).resolve() == root and MANIFEST_NAME in names:
+                    return {MANIFEST_NAME}
+                return set()
 
-        shutil.copytree(root, snapshot, symlinks=True, ignore=ignore_root_manifest)
-        report = validate_dataset(snapshot, require_manifest=False)
-        if report.state != "certified":
-            raise DatasetError("build-release requires dataset state certified")
-        manifest = make_manifest(snapshot, report)
-        manifest_body = _canonical_json(manifest)
-        _write_atomic(snapshot / MANIFEST_NAME, manifest_body)
-        verify_manifest(snapshot, report)
-        snapshot_inventory = sorted([*_release_inventory(snapshot), (MANIFEST_NAME, "file")])
-        expected_archive_files = {
-            entry["path"]: (entry["bytes"], entry["sha256"]) for entry in manifest["files"]
-        }
-        expected_archive_files[MANIFEST_NAME] = (
-            len(manifest_body),
-            hashlib.sha256(manifest_body).hexdigest(),
-        )
-        staged_archive = Path(temporary) / "release.tar.gz"
-        staged_stream = staged_archive.open("w+b")
-        try:
-            _write_archive_stream(
-                snapshot,
-                f"{report.id}-{report.version}",
-                staged_stream,
-                expected_inventory=snapshot_inventory,
-                expected_files=expected_archive_files,
+            shutil.copytree(root, snapshot, symlinks=True, ignore=ignore_root_manifest)
+            report = validate_dataset(snapshot, require_manifest=False)
+            if report.state != "certified":
+                raise DatasetError("build-release requires dataset state certified")
+            manifest = make_manifest(snapshot, report)
+            manifest_body = _canonical_json(manifest)
+            _write_atomic(snapshot / MANIFEST_NAME, manifest_body)
+            verify_manifest(snapshot, report)
+            snapshot_inventory = sorted([*_release_inventory(snapshot), (MANIFEST_NAME, "file")])
+            expected_archive_files = {
+                entry["path"]: (entry["bytes"], entry["sha256"])
+                for entry in manifest["files"]
+            }
+            expected_archive_files[MANIFEST_NAME] = (
+                len(manifest_body),
+                hashlib.sha256(manifest_body).hexdigest(),
             )
-            staged_stream.flush()
-            os.fsync(staged_stream.fileno())
-            archive_sha256 = _stream_sha256(staged_stream)
+            staged_archive = Path(temporary) / "release.tar.gz"
+            staged_stream = staged_archive.open("w+b")
+            try:
+                _write_archive_stream(
+                    snapshot,
+                    f"{report.id}-{report.version}",
+                    staged_stream,
+                    expected_inventory=snapshot_inventory,
+                    expected_files=expected_archive_files,
+                )
+                staged_stream.flush()
+                os.fsync(staged_stream.fileno())
+                archive_sha256 = _stream_sha256(staged_stream)
+                archive_bytes = os.fstat(staged_stream.fileno()).st_size
 
-            current_report = validate_dataset(root, require_manifest=False)
-            if (
-                make_manifest(root, current_report) != manifest
-                or _release_inventory(root) != _release_inventory(snapshot)
-            ):
-                raise DatasetError("dataset changed during release build")
-            _write_atomic(root / MANIFEST_NAME, manifest_body)
-            verify_manifest(root)
-            final_report = validate_dataset(root, require_manifest=False)
-            if (
-                make_manifest(root, final_report) != manifest
-                or _release_inventory(root) != _release_inventory(snapshot)
-            ):
-                raise DatasetError("dataset changed during release publication")
-            _publish_archive(staged_stream, output, archive_sha256)
-        finally:
-            staged_stream.close()
+                current_report = validate_dataset(root, require_manifest=False)
+                if (
+                    make_manifest(root, current_report) != manifest
+                    or _release_inventory(root) != _release_inventory(snapshot)
+                ):
+                    raise DatasetError("dataset changed during release build")
+                _write_atomic(root / MANIFEST_NAME, manifest_body)
+                verify_manifest(root)
+                final_report = validate_dataset(root, require_manifest=False)
+                if (
+                    make_manifest(root, final_report) != manifest
+                    or _release_inventory(root) != _release_inventory(snapshot)
+                ):
+                    raise DatasetError("dataset changed during release publication")
+                _assert_output_parent_unchanged(output, opened_parent)
+                _publish_archive(
+                    staged_stream,
+                    output,
+                    archive_sha256,
+                    parent_fd=parent_fd,
+                )
+                _assert_output_parent_unchanged(output, opened_parent)
+            finally:
+                staged_stream.close()
+    finally:
+        os.close(parent_fd)
     return {
         "dataset": {
             "id": report.id,
@@ -376,8 +442,8 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
         "manifest": str(root / MANIFEST_NAME),
         "manifest_sha256": sha256_file(root / MANIFEST_NAME),
         "archive": str(output),
-        "archive_sha256": sha256_file(output),
-        "archive_bytes": output.stat().st_size,
+        "archive_sha256": archive_sha256,
+        "archive_bytes": archive_bytes,
     }
 
 

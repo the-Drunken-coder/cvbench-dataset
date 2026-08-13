@@ -1060,17 +1060,41 @@ def test_release_publication_uses_bound_archive_stream(
     archive = tmp_path / "release.tar.gz"
     publish_original = manifest_module._publish_archive
 
-    def replace_staged_path(stream, output: Path, expected_sha256: str) -> None:
+    def replace_staged_path(stream, output: Path, expected_sha256: str, **kwargs) -> None:
         staged_path = Path(stream.name)
         replacement = staged_path.with_suffix(".replacement")
         replacement.write_bytes(b"unvalidated archive")
         replacement.replace(staged_path)
-        publish_original(stream, output, expected_sha256)
+        publish_original(stream, output, expected_sha256, **kwargs)
 
     monkeypatch.setattr(manifest_module, "_publish_archive", replace_staged_path)
     result = build_release(dataset, archive)
     assert result["archive_sha256"] != hashlib.sha256(b"unvalidated archive").hexdigest()
     verify_release(dataset, archive)
+
+
+def test_release_publication_stays_bound_to_opened_output_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _copy_sample(tmp_path)
+    parent = tmp_path / "publish"
+    parent.mkdir()
+    output = parent / "release.tar.gz"
+    moved_parent = tmp_path / "moved-publish"
+    publish_original = manifest_module._publish_archive
+
+    def move_parent_before_publish(stream, output: Path, expected_sha256: str, **kwargs) -> None:
+        parent.rename(moved_parent)
+        parent.mkdir()
+        (parent / "owner.txt").write_text("replacement parent\n")
+        publish_original(stream, output, expected_sha256, **kwargs)
+
+    monkeypatch.setattr(manifest_module, "_publish_archive", move_parent_before_publish)
+    with pytest.raises(DatasetError, match="output parent changed during publication"):
+        build_release(dataset, output)
+    assert not output.exists()
+    assert (parent / "owner.txt").read_text() == "replacement parent\n"
+    assert (moved_parent / "release.tar.gz").is_file()
 
 
 def test_build_release_fails_closed_for_noncertified_state(tmp_path: Path) -> None:
