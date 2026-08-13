@@ -1103,12 +1103,12 @@ def test_release_publication_uses_bound_archive_stream(
     archive = tmp_path / "release.tar.gz"
     publish_original = manifest_module._publish_archive
 
-    def replace_staged_path(stream, output: Path, expected_sha256: str, **kwargs) -> None:
+    def replace_staged_path(stream, output: Path, expected_sha256: str, **kwargs):
         staged_path = Path(stream.name)
         replacement = staged_path.with_suffix(".replacement")
         replacement.write_bytes(b"unvalidated archive")
         replacement.replace(staged_path)
-        publish_original(stream, output, expected_sha256, **kwargs)
+        return publish_original(stream, output, expected_sha256, **kwargs)
 
     monkeypatch.setattr(manifest_module, "_publish_archive", replace_staged_path)
     result = build_release(dataset, archive)
@@ -1153,6 +1153,30 @@ def test_release_rebinds_output_name_after_hashing_published_inode(
         build_release(dataset, archive)
     assert archive.read_bytes() == b"unrelated replacement"
     assert displaced.is_file()
+
+
+def test_release_quarantines_archive_that_fails_post_rename_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _copy_sample(tmp_path)
+    archive = tmp_path / "release.tar.gz"
+    hash_original = manifest_module._stream_sha256
+    mutated = False
+
+    def mutate_then_hash(stream) -> str:
+        nonlocal mutated
+        if not mutated:
+            archive.write_bytes(b"changed during publication")
+            mutated = True
+        return hash_original(stream)
+
+    monkeypatch.setattr(manifest_module, "_stream_sha256", mutate_then_hash)
+    with pytest.raises(DatasetError, match="changed during publication"):
+        build_release(dataset, archive)
+    assert not archive.exists()
+    rejected = list(tmp_path.glob(".release.tar.gz.rejected-*"))
+    assert len(rejected) == 1
+    assert rejected[0].read_bytes() == b"changed during publication"
 
 
 def test_release_publication_stays_bound_to_opened_output_parent(
@@ -1223,6 +1247,31 @@ def test_release_revalidates_live_dataset_after_archive_publication(
     assert not archive.exists()
     rejected = list(tmp_path.glob(".release.tar.gz.rejected-*"))
     assert len(rejected) == 1
+
+
+def test_release_reverifies_archive_after_final_dataset_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _copy_sample(tmp_path)
+    archive = tmp_path / "release.tar.gz"
+    verify_original = manifest_module.verify_manifest
+    mutated = False
+
+    def verify_then_mutate_archive(root: Path, *args, **kwargs):
+        nonlocal mutated
+        result = verify_original(root, *args, **kwargs)
+        if Path(root).resolve() == dataset.resolve() and archive.exists() and not mutated:
+            archive.write_bytes(b"changed after dataset validation")
+            mutated = True
+        return result
+
+    monkeypatch.setattr(manifest_module, "verify_manifest", verify_then_mutate_archive)
+    with pytest.raises(DatasetError, match="changed after final dataset validation"):
+        build_release(dataset, archive)
+    assert not archive.exists()
+    rejected = list(tmp_path.glob(".release.tar.gz.rejected-*"))
+    assert len(rejected) == 1
+    assert rejected[0].read_bytes() == b"changed after dataset validation"
 
 
 def test_release_refuses_existing_output(tmp_path: Path) -> None:
