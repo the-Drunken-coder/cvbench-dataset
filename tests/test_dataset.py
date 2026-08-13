@@ -375,6 +375,35 @@ def test_hydration_rejects_replaced_output_parent(
     assert not (moved_parent / "hydrated").exists()
 
 
+def test_hydration_rejects_replaced_staging_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    output = tmp_path / "hydrated"
+    validate_original = source_recipe_module.validate_dataset
+
+    def validate_then_replace_staging(root: Path):
+        result = validate_original(root)
+        stolen = root.with_name(f"{root.name}-stolen")
+        root.rename(stolen)
+        root.mkdir()
+        return result
+
+    monkeypatch.setattr(source_recipe_module, "validate_dataset", validate_then_replace_staging)
+    with pytest.raises(DatasetError, match="staging directory changed"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
+
+
+def test_hydration_rejects_unprotected_shared_output_parent(tmp_path: Path) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(0o777)
+    with pytest.raises(DatasetError, match="private or use sticky-directory protection"):
+        hydrate_source_recipe(recipe, source_dir, parent / "hydrated")
+
+
 def test_hydration_rejects_output_inside_source_recipe(tmp_path: Path) -> None:
     recipe, source_dir = _source_recipe(tmp_path)
     output = recipe / "clips" / "hydrated"
