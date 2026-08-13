@@ -179,7 +179,9 @@ def validate_source_recipe(root: str | Path) -> SourceRecipeReport:
     required_lock_fields = {"id", "filename", "sha256"}
     if any(set(item) != required_lock_fields for item in locked_clips):
         raise DatasetError(f"source-lock.json clips must contain exactly {sorted(required_lock_fields)}")
-    lock_by_id = {item.get("id"): item for item in locked_clips}
+    if any(not isinstance(item["id"], str) for item in locked_clips):
+        raise DatasetError("source-lock.json clip IDs must be strings")
+    lock_by_id = {item["id"]: item for item in locked_clips}
     if len(lock_by_id) != len(locked_clips) or set(lock_by_id) != set(clip_ids):
         raise DatasetError("source-lock.json clip IDs must match dataset.yaml exactly")
 

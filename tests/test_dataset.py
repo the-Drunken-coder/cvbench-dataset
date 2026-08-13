@@ -238,6 +238,15 @@ def test_source_recipe_rejects_media_drift_without_partial_output(tmp_path: Path
     assert not output.exists()
 
 
+def test_source_recipe_rejects_non_string_lock_id(tmp_path: Path) -> None:
+    recipe, _ = _source_recipe(tmp_path)
+    source_lock = json.loads((recipe / "source-lock.json").read_text())
+    source_lock["clips"][0]["id"] = ["synthetic-clip"]
+    _write_json(recipe / "source-lock.json", source_lock)
+    with pytest.raises(DatasetError, match="clip IDs must be strings"):
+        validate_source_recipe(recipe)
+
+
 def test_source_recipe_rejects_conflicting_hashes_for_one_filename(tmp_path: Path) -> None:
     recipe, _ = _source_recipe(tmp_path)
     descriptor = yaml.safe_load((recipe / "dataset.yaml").read_text())
