@@ -6,7 +6,6 @@ import os
 import shutil
 import stat
 import sys
-import tempfile
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -35,6 +34,10 @@ RECIPE_TOP_LEVEL_NAMES = {
     "schemas",
     "source-lock.json",
 }
+
+
+def _directory_anchored_publication_supported() -> bool:
+    return sys.platform in {"darwin", "linux"}
 
 
 def _directory_fd_path(directory_fd: int) -> Path:
@@ -356,33 +359,35 @@ def hydrate_source_recipe(
         pass
     else:
         raise DatasetError("hydrate output must be outside the source recipe")
+    if not _directory_anchored_publication_supported():
+        raise DatasetError("directory-anchored hydrate publication is unsupported on this platform")
     output.parent.mkdir(parents=True, exist_ok=True)
-    if os.name == "nt":
-        temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}-", dir=output.parent))
-        parent_fd = None
-        temporary_name = None
+    parent_fd = os.open(output.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    opened_parent = os.fstat(parent_fd)
+    if (
+        opened_parent.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        and not opened_parent.st_mode & stat.S_ISVTX
+    ):
+        os.close(parent_fd)
+        raise DatasetError(
+            "hydrate output parent must be private or use sticky-directory protection"
+        )
+    try:
+        os.stat(output.name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
     else:
-        parent_fd = os.open(output.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        opened_parent = os.fstat(parent_fd)
-        if (
-            opened_parent.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-            and not opened_parent.st_mode & stat.S_ISVTX
-        ):
-            os.close(parent_fd)
-            raise DatasetError(
-                "hydrate output parent must be private or use sticky-directory protection"
-            )
-        try:
-            os.stat(output.name, dir_fd=parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
-            os.close(parent_fd)
-            raise DatasetError(f"hydrate target already exists: {output}")
-        temporary_name = f".{output.name}-{uuid.uuid4().hex}"
+        os.close(parent_fd)
+        raise DatasetError(f"hydrate target already exists: {output}")
+    temporary_name = f".{output.name}-{uuid.uuid4().hex}"
+    try:
         os.mkdir(temporary_name, mode=0o700, dir_fd=parent_fd)
         staged_directory = os.stat(temporary_name, dir_fd=parent_fd, follow_symlinks=False)
-        temporary = _directory_fd_path(parent_fd) / temporary_name
+    except BaseException:
+        os.close(parent_fd)
+        raise
+    temporary = _directory_fd_path(parent_fd) / temporary_name
+    cleanup_staging = True
     try:
         for name in (
             "README.md",
@@ -410,48 +415,57 @@ def hydrate_source_recipe(
             if sha256_file(copied_video) != clip.source_sha256:
                 raise DatasetError(f"source video changed during hydration: {clip.source_filename}")
         hydrated = validate_dataset(temporary).to_dict()
-        if parent_fd is None:
-            _rename_no_replace(temporary, output)
-        else:
-            try:
-                current_parent = os.stat(output.parent, follow_symlinks=False)
-            except FileNotFoundError as exc:
-                raise DatasetError("hydrate output parent changed during publication") from exc
-            if (
-                not stat.S_ISDIR(current_parent.st_mode)
-                or (current_parent.st_dev, current_parent.st_ino)
-                != (opened_parent.st_dev, opened_parent.st_ino)
-            ):
-                raise DatasetError("hydrate output parent changed during publication")
+        try:
+            current_parent = os.stat(output.parent, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise DatasetError("hydrate output parent changed during publication") from exc
+        if (
+            not stat.S_ISDIR(current_parent.st_mode)
+            or (current_parent.st_dev, current_parent.st_ino)
+            != (opened_parent.st_dev, opened_parent.st_ino)
+        ):
+            raise DatasetError("hydrate output parent changed during publication")
+        try:
+            current_staging = os.stat(
+                temporary_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError as exc:
+            cleanup_staging = False
+            raise DatasetError("hydrate staging directory changed during publication") from exc
+        if (
+            not stat.S_ISDIR(current_staging.st_mode)
+            or (current_staging.st_dev, current_staging.st_ino)
+            != (staged_directory.st_dev, staged_directory.st_ino)
+        ):
+            cleanup_staging = False
+            raise DatasetError("hydrate staging directory changed during publication")
+        _rename_no_replace(
+            Path(temporary.name),
+            Path(output.name),
+            source_dir_fd=parent_fd,
+            destination_dir_fd=parent_fd,
+        )
+    except BaseException:
+        if cleanup_staging:
             try:
                 current_staging = os.stat(
-                    str(temporary_name),
+                    temporary_name,
                     dir_fd=parent_fd,
                     follow_symlinks=False,
                 )
-            except FileNotFoundError as exc:
-                raise DatasetError("hydrate staging directory changed during publication") from exc
-            if (
-                not stat.S_ISDIR(current_staging.st_mode)
-                or (current_staging.st_dev, current_staging.st_ino)
-                != (staged_directory.st_dev, staged_directory.st_ino)
-            ):
-                raise DatasetError("hydrate staging directory changed during publication")
-            _rename_no_replace(
-                Path(temporary.name),
-                Path(output.name),
-                source_dir_fd=parent_fd,
-                destination_dir_fd=parent_fd,
-            )
-    except BaseException:
-        cleanup = (
-            temporary
-            if parent_fd is None
-            else _directory_fd_path(parent_fd) / str(temporary_name)
-        )
-        shutil.rmtree(cleanup, ignore_errors=True)
+            except FileNotFoundError:
+                cleanup_staging = False
+            else:
+                cleanup_staging = (
+                    stat.S_ISDIR(current_staging.st_mode)
+                    and (current_staging.st_dev, current_staging.st_ino)
+                    == (staged_directory.st_dev, staged_directory.st_ino)
+                )
+        if cleanup_staging:
+            shutil.rmtree(_directory_fd_path(parent_fd) / temporary_name, ignore_errors=True)
         raise
     finally:
-        if parent_fd is not None:
-            os.close(parent_fd)
+        os.close(parent_fd)
     return hydrated

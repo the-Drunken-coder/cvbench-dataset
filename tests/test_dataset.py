@@ -258,6 +258,15 @@ def test_source_recipe_rejects_non_string_lock_id(tmp_path: Path) -> None:
         validate_source_recipe(recipe)
 
 
+def test_source_recipe_rejects_schema_directory(tmp_path: Path) -> None:
+    recipe, _ = _source_recipe(tmp_path)
+    schema = recipe / "schemas" / "dataset-v1.schema.json"
+    schema.unlink()
+    schema.mkdir()
+    with pytest.raises(DatasetError, match="canonical schema must be a regular file"):
+        validate_source_recipe(recipe)
+
+
 def test_source_recipe_rejects_conflicting_hashes_for_one_filename(tmp_path: Path) -> None:
     recipe, _ = _source_recipe(tmp_path)
     descriptor = yaml.safe_load((recipe / "dataset.yaml").read_text())
@@ -381,16 +390,37 @@ def test_hydration_rejects_replaced_staging_directory(
     recipe, source_dir = _source_recipe(tmp_path)
     output = tmp_path / "hydrated"
     validate_original = source_recipe_module.validate_dataset
+    replacement: Path | None = None
 
     def validate_then_replace_staging(root: Path):
+        nonlocal replacement
         result = validate_original(root)
         stolen = root.with_name(f"{root.name}-stolen")
         root.rename(stolen)
         root.mkdir()
+        (root / "owner.txt").write_text("preserve me\n")
+        replacement = root
         return result
 
     monkeypatch.setattr(source_recipe_module, "validate_dataset", validate_then_replace_staging)
     with pytest.raises(DatasetError, match="staging directory changed"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
+    assert replacement is not None
+    assert (replacement / "owner.txt").read_text() == "preserve me\n"
+
+
+def test_hydration_fails_closed_without_directory_anchored_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    monkeypatch.setattr(
+        source_recipe_module,
+        "_directory_anchored_publication_supported",
+        lambda: False,
+    )
+    output = tmp_path / "hydrated"
+    with pytest.raises(DatasetError, match="unsupported on this platform"):
         hydrate_source_recipe(recipe, source_dir, output)
     assert not output.exists()
 

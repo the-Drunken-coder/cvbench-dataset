@@ -133,7 +133,14 @@ def _assert_canonical_schemas(root: Path) -> None:
     if actual != set(SCHEMA_NAMES):
         raise DatasetError(f"schemas must contain exactly {list(SCHEMA_NAMES)}, found {sorted(actual)}")
     for name in SCHEMA_NAMES:
-        if (schema_root / name).read_bytes() != schema_bytes(name):
+        path = schema_root / name
+        if path.is_symlink() or not path.is_file():
+            raise DatasetError(f"canonical schema must be a regular file: {name}")
+        try:
+            actual_bytes = path.read_bytes()
+        except OSError as exc:
+            raise DatasetError(f"cannot read canonical schema {name}: {exc}") from exc
+        if actual_bytes != schema_bytes(name):
             raise DatasetError(f"dataset schema does not match the validator's canonical {name}")
 
 
