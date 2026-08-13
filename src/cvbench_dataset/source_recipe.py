@@ -312,6 +312,12 @@ def hydrate_source_recipe(
             raise DatasetError(f"source video hash mismatch: {path}")
 
     output = requested_output.resolve()
+    try:
+        output.relative_to(root)
+    except ValueError:
+        pass
+    else:
+        raise DatasetError("hydrate output must be outside the source recipe")
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}-", dir=output.parent))
     try:

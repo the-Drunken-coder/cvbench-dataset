@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+import cvbench_dataset.manifest as manifest_module
 import cvbench_dataset.source_recipe as source_recipe_module
 from cvbench_dataset import (
     DatasetError,
@@ -317,6 +318,15 @@ def test_hydration_publishes_complete_directory_once(
     assert validate_dataset(output).id == "minimal-synthetic"
 
 
+def test_hydration_rejects_output_inside_source_recipe(tmp_path: Path) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    output = recipe / "clips" / "hydrated"
+    with pytest.raises(DatasetError, match="outside the source recipe"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
+    validate_source_recipe(recipe)
+
+
 def test_hydration_rechecks_copied_source_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     recipe, source_dir = _source_recipe(tmp_path)
     source_video = source_dir / "synthetic-source.mp4"
@@ -511,6 +521,43 @@ def test_release_processing_never_reads_video_whole(tmp_path: Path, monkeypatch:
     monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
     build_release(dataset, archive)
     verify_release(dataset, archive)
+
+
+def test_release_rejects_config_changed_after_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _copy_sample(tmp_path)
+    artifact = dataset / "artifacts" / "config.json"
+    artifact.parent.mkdir()
+    artifact.write_text('{"version":1}\n')
+    source_path = dataset / "clips" / "synthetic-clip" / "source.json"
+    source = json.loads(source_path.read_text())
+    source["transformations"].append(
+        {
+            "kind": "fixture",
+            "description": "Synthetic fixture configuration.",
+            "config_file": "artifacts/config.json",
+            "config_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        }
+    )
+    _write_json(source_path, source)
+    _rewrite_reviews(dataset)
+    validate_dataset(dataset, require_manifest=False)
+
+    copytree_original = manifest_module.shutil.copytree
+
+    def copy_then_replace_config(source_root: Path, snapshot: Path, *args, **kwargs):
+        result = copytree_original(source_root, snapshot, *args, **kwargs)
+        replacement = artifact.with_suffix(".replacement")
+        replacement.write_text('{"version":2}\n')
+        replacement.replace(artifact)
+        return result
+
+    monkeypatch.setattr(manifest_module.shutil, "copytree", copy_then_replace_config)
+    archive = tmp_path / "release.tar.gz"
+    with pytest.raises(DatasetError, match="config_file SHA-256"):
+        build_release(dataset, archive)
+    assert not archive.exists()
 
 
 def test_build_release_fails_closed_for_noncertified_state(tmp_path: Path) -> None:

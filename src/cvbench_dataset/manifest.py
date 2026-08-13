@@ -4,6 +4,7 @@ import gzip
 import hashlib
 import json
 import os
+import shutil
 import tarfile
 import tempfile
 from pathlib import Path
@@ -199,14 +200,26 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
         pass
     else:
         raise DatasetError("release archive output must be outside the dataset root")
-    report = validate_dataset(root, require_manifest=False)
-    if report.state != "certified":
-        raise DatasetError("build-release requires dataset state certified")
-    manifest = make_manifest(root, report)
-    _write_atomic(root / MANIFEST_NAME, _canonical_json(manifest))
-    verify_manifest(root, report)
-    prefix = f"{report.id}-{report.version}"
-    _write_archive(root, prefix, output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".{output.name}.", dir=output.parent) as temporary:
+        snapshot = Path(temporary) / "dataset"
+        shutil.copytree(root, snapshot, symlinks=True, ignore=shutil.ignore_patterns(MANIFEST_NAME))
+        report = validate_dataset(snapshot, require_manifest=False)
+        if report.state != "certified":
+            raise DatasetError("build-release requires dataset state certified")
+        manifest = make_manifest(snapshot, report)
+        manifest_body = _canonical_json(manifest)
+        _write_atomic(snapshot / MANIFEST_NAME, manifest_body)
+        verify_manifest(snapshot, report)
+        staged_archive = Path(temporary) / "release.tar.gz"
+        _write_archive(snapshot, f"{report.id}-{report.version}", staged_archive)
+
+        current_report = validate_dataset(root, require_manifest=False)
+        if make_manifest(root, current_report) != manifest:
+            raise DatasetError("dataset changed during release build")
+        _write_atomic(root / MANIFEST_NAME, manifest_body)
+        verify_manifest(root)
+        os.replace(staged_archive, output)
     return {
         "dataset": {
             "id": report.id,
