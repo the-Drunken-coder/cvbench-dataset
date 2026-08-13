@@ -15,7 +15,7 @@ from .errors import DatasetError
 from .schema import SCHEMA_NAMES, schema_bytes, validate_schema
 
 CLIP_FILENAMES = {"review.jsonl", "source.json", "tracks.jsonl", "video.mp4"}
-TOP_LEVEL_NAMES = {"clips", "dataset.yaml", "licenses", "release-manifest.json", "schemas"}
+TOP_LEVEL_NAMES = {"artifacts", "clips", "dataset.yaml", "licenses", "release-manifest.json", "schemas"}
 MODEL_ORIGINS = {"model_assisted", "model_generated"}
 
 
@@ -133,7 +133,14 @@ def _assert_canonical_schemas(root: Path) -> None:
     if actual != set(SCHEMA_NAMES):
         raise DatasetError(f"schemas must contain exactly {list(SCHEMA_NAMES)}, found {sorted(actual)}")
     for name in SCHEMA_NAMES:
-        if (schema_root / name).read_bytes() != schema_bytes(name):
+        path = schema_root / name
+        if path.is_symlink() or not path.is_file():
+            raise DatasetError(f"canonical schema must be a regular file: {name}")
+        try:
+            actual_bytes = path.read_bytes()
+        except OSError as exc:
+            raise DatasetError(f"cannot read canonical schema {name}: {exc}") from exc
+        if actual_bytes != schema_bytes(name):
             raise DatasetError(f"dataset schema does not match the validator's canonical {name}")
 
 
@@ -156,6 +163,23 @@ def _assert_video(path: Path) -> None:
             chunk = handle.read(1024 * 1024)
     if not found_moov or not found_mdat:
         raise DatasetError(f"{path} is not a self-contained MP4 file")
+
+
+def _validate_config_artifacts(root: Path, source: dict[str, Any], source_path: Path) -> None:
+    values = [*source["transformations"], *source["model_runs"]]
+    for value in values:
+        relative = value.get("config_file")
+        if relative is None:
+            continue
+        path = root / relative
+        try:
+            path.resolve().relative_to((root / "artifacts").resolve())
+        except ValueError as exc:
+            raise DatasetError(f"{source_path}: config_file escapes artifacts/") from exc
+        if path.is_symlink() or not path.is_file():
+            raise DatasetError(f"{source_path}: declared config_file is missing")
+        if sha256_file(path) != value["config_sha256"]:
+            raise DatasetError(f"{source_path}: config_file SHA-256 does not match config_sha256")
 
 
 def _validate_tracks(
@@ -196,6 +220,10 @@ def _validate_tracks(
             raise DatasetError(f"{context}: bbox coordinates must be finite")
         if not (0 <= box[0] < box[2] <= media["width"] and 0 <= box[1] < box[3] <= media["height"]):
             raise DatasetError(f"{context}: bbox_xyxy lies outside the declared media dimensions")
+
+        confidence = row.get("confidence")
+        if confidence is not None and not math.isfinite(confidence):
+            raise DatasetError(f"{context}: confidence must be finite")
 
         origin = row["label_origin"]
         referenced_runs = set(origin["model_run_ids"])
@@ -271,6 +299,7 @@ def _validate_clip(
     model_run_ids = [item["run_id"] for item in source["model_runs"]]
     if len(model_run_ids) != len(set(model_run_ids)):
         raise DatasetError(f"{source_path}: duplicate model run IDs")
+    _validate_config_artifacts(root, source, source_path)
     license_path = root / source["source"]["license"]["file"]
     try:
         license_path.resolve().relative_to((root / "licenses").resolve())
@@ -353,6 +382,53 @@ def validate_dataset(root: str | Path, *, require_manifest: bool = True) -> Data
         )
         for clip in descriptor["clips"]
     ]
+    referenced_configs = {
+        value["config_file"]
+        for clip in descriptor["clips"]
+        for value in [
+            *_load_json(root / clip["path"] / "source.json")["transformations"],
+            *_load_json(root / clip["path"] / "source.json")["model_runs"],
+        ]
+        if "config_file" in value
+    }
+    artifact_root = root / "artifacts"
+    if (artifact_root.exists() or artifact_root.is_symlink()) and not artifact_root.is_dir():
+        raise DatasetError("dataset artifacts entry must be a directory")
+    actual_configs = (
+        {
+            path.relative_to(root).as_posix()
+            for path in artifact_root.rglob("*")
+            if path.is_file()
+        }
+        if artifact_root.is_dir()
+        else set()
+    )
+    actual_config_directories = (
+        {
+            path.relative_to(root).as_posix()
+            for path in (artifact_root, *artifact_root.rglob("*"))
+            if path.is_dir()
+        }
+        if artifact_root.is_dir()
+        else set()
+    )
+    expected_config_directories = {
+        parent.as_posix()
+        for relative in referenced_configs
+        for parent in Path(relative).parents
+        if parent != Path(".")
+    }
+    if actual_configs != referenced_configs:
+        raise DatasetError(
+            "dataset config artifacts mismatch: "
+            f"referenced {sorted(referenced_configs)}, found {sorted(actual_configs)}"
+        )
+    if actual_config_directories != expected_config_directories:
+        raise DatasetError(
+            "dataset config artifact directories mismatch: "
+            f"expected {sorted(expected_config_directories)}, "
+            f"found {sorted(actual_config_directories)}"
+        )
     origins: Counter[str] = Counter()
     for clip in clips:
         origins.update(clip.annotation_origins)

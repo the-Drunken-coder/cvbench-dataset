@@ -82,10 +82,10 @@
       "sha256": "aa8c226261539030f3eca237dfb6c9fd88b5a65f20816c2dd96eeb925754380d"
     },
     {
-      "bytes": 3991,
+      "bytes": 4310,
       "path": "schemas/source-v1.schema.json",
       "role": "schema",
-      "sha256": "3092d7d816b766a4532887d47477d763e30e5b8e3858b0cf85902f0a165ab7a9"
+      "sha256": "7e7e1478adeb32dff62c44f27e223e559d5d5a8f29b5a09f283edb2016bb71f7"
     },
     {
       "bytes": 636,
@@ -94,13 +94,13 @@
       "sha256": "c53b575fbcce82ae1aa05837f490579f7d38a12483fddf737948c5bb81e35e63"
     },
     {
-      "bytes": 1478,
+      "bytes": 1544,
       "path": "schemas/track-annotation-v1.schema.json",
       "role": "schema",
-      "sha256": "736dfa51f755ac803c9ef84ce377ff5bfb89a5a43d0067fbd5bad983afa6bb79"
+      "sha256": "17f96ad1a41a14101178c6e82889486047b73acc86d1b4eab1d2a6201a890e3b"
     }
   ],
   "hash_algorithm": "sha256",
-  "manifest_content_sha256": "247f4be4246e60800f25cf89019fdb245c7264a4a6ecf308489acd396fcdeca9",
+  "manifest_content_sha256": "c3b2c5c427cfff1106598537085793494309c8d11e5a01ab324b6a583b5d984b",
   "schema_version": "cvbench.dataset-release/v1"
 }

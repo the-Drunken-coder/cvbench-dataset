@@ -1,0 +1,30 @@
+{
+  "clips": [
+    {
+      "filename": "pexels-18187166-huacachina-sand-dune-4k.mp4",
+      "id": "pexels-18187166-dune",
+      "sha256": "05bc3794c11d787e946d868f6d5e2d1a40b0939dc6218aa3263b138adc64e0cc"
+    },
+    {
+      "filename": "pixabay-112059-young-woman-road-dog-4k.mp4",
+      "id": "pixabay-112059-dog-road",
+      "sha256": "b9fdd57c97d629552dcdb6063a88827a27dfa240834d39cd47dc992207842c1b"
+    },
+    {
+      "filename": "pixabay-145851-man-trees-nature-bench-4k.mp4",
+      "id": "pixabay-145851-forest-bench",
+      "sha256": "b22382b1e94ca5189ff76a9ce37dd71660a36a785d0b50f897a23db363b083d9"
+    },
+    {
+      "filename": "pixabay-212474-man-walking-forest-4k.mp4",
+      "id": "pixabay-212474-forest-walk",
+      "sha256": "1f0b743c9b2af9fefe8c6dae05adb613b24b59c94f8bf2319d726eaee720177a"
+    },
+    {
+      "filename": "pixabay-28855-autumn-forest-tourists.mp4",
+      "id": "pixabay-28855-ravine",
+      "sha256": "825d9707b99ad212efc94e0dda630ba9253239b404c960002c7b385386e69641"
+    }
+  ],
+  "schema_version": "cvbench.source-recipe/v1"
+}

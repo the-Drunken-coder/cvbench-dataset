@@ -1,0 +1,6 @@
+Pixabay Content License notice
+
+Authoritative terms: https://pixabay.com/service/license-summary/
+Full terms: https://pixabay.com/service/terms/
+
+The source pages identify these clips as Pixabay content. The license allows use and adaptation subject to its prohibited uses, including restrictions on standalone redistribution. This public recipe therefore pins the originals by source URL and SHA-256 but does not redistribute their bytes.
