@@ -665,9 +665,7 @@ def test_hydration_detects_staging_swap_during_rename(
     with pytest.raises(DatasetError, match="staging directory changed during publication"):
         hydrate_source_recipe(recipe, source_dir, output)
     assert not output.exists()
-    rejected = list(tmp_path.glob(".hydrated.rejected-*"))
-    assert len(rejected) == 1
-    assert (rejected[0] / "clips" / "synthetic-clip" / "video.mp4").read_bytes() == b"replacement"
+    assert not list(tmp_path.glob(".hydrated.rejected-*"))
 
 
 def test_hydration_rechecks_requested_parent_after_publication(
@@ -679,17 +677,31 @@ def test_hydration_rechecks_requested_parent_after_publication(
     output = parent / "hydrated"
     moved_parent = tmp_path / "moved-publish"
     rename_original = source_recipe_module._rename_no_replace
+    moved = False
 
     def publish_then_move_parent(source: Path, destination: Path, **kwargs) -> None:
+        nonlocal moved
         rename_original(source, destination, **kwargs)
-        parent.rename(moved_parent)
-        parent.mkdir()
+        if not moved:
+            moved = True
+            parent.rename(moved_parent)
+            parent.mkdir()
 
     monkeypatch.setattr(source_recipe_module, "_rename_no_replace", publish_then_move_parent)
     with pytest.raises(DatasetError, match="output parent changed during publication"):
         hydrate_source_recipe(recipe, source_dir, output)
     assert not output.exists()
-    assert (moved_parent / "hydrated").is_dir()
+    rejected = list(moved_parent.glob(".hydrated.rejected-*"))
+    assert len(rejected) == 1
+    assert validate_dataset(rejected[0]).id == "minimal-synthetic"
+
+
+def test_hydration_requires_existing_output_parent(tmp_path: Path) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    output = tmp_path / "missing" / "hydrated"
+    with pytest.raises(DatasetError, match="cannot anchor hydrate output parent"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
 
 
 def test_hydration_quarantines_content_mutated_during_publication(
@@ -716,6 +728,38 @@ def test_hydration_quarantines_content_mutated_during_publication(
     assert not output.exists()
     rejected = list(tmp_path.glob(".hydrated.rejected-*"))
     assert len(rejected) == 1
+
+
+def test_hydration_does_not_quarantine_replacement_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    rename_original = source_recipe_module._rename_no_replace
+    published = False
+    displaced = tmp_path / "displaced-rejected-publication"
+
+    def replace_before_quarantine(source: Path, destination: Path, **kwargs) -> None:
+        nonlocal published
+        parent = source_recipe_module._directory_fd_path(kwargs["source_dir_fd"])
+        if not published:
+            published = True
+            rename_original(source, destination, **kwargs)
+            (parent / destination / "clips" / "synthetic-clip" / "video.mp4").write_bytes(
+                b"invalid publication"
+            )
+            return
+        current = parent / source
+        current.rename(displaced)
+        current.mkdir()
+        (current / "owner.txt").write_text("unrelated replacement\n")
+        rename_original(source, destination, **kwargs)
+
+    monkeypatch.setattr(source_recipe_module, "_rename_no_replace", replace_before_quarantine)
+    output = tmp_path / "hydrated"
+    with pytest.raises(DatasetError, match="could not be quarantined"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert (output / "owner.txt").read_text() == "unrelated replacement\n"
+    assert displaced.is_dir()
 
 
 def test_canonical_validation_rejects_config_artifact_drift(tmp_path: Path) -> None:
@@ -962,6 +1006,26 @@ def test_release_rechecks_directories_immediately_before_publication(
     with pytest.raises(DatasetError, match="changed during release publication"):
         build_release(dataset, archive)
     assert not archive.exists()
+
+
+def test_release_publication_uses_bound_archive_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _copy_sample(tmp_path)
+    archive = tmp_path / "release.tar.gz"
+    publish_original = manifest_module._publish_archive
+
+    def replace_staged_path(stream, output: Path, expected_sha256: str) -> None:
+        staged_path = Path(stream.name)
+        replacement = staged_path.with_suffix(".replacement")
+        replacement.write_bytes(b"unvalidated archive")
+        replacement.replace(staged_path)
+        publish_original(stream, output, expected_sha256)
+
+    monkeypatch.setattr(manifest_module, "_publish_archive", replace_staged_path)
+    result = build_release(dataset, archive)
+    assert result["archive_sha256"] != hashlib.sha256(b"unvalidated archive").hexdigest()
+    verify_release(dataset, archive)
 
 
 def test_build_release_fails_closed_for_noncertified_state(tmp_path: Path) -> None:

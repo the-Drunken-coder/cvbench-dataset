@@ -93,12 +93,14 @@ Validate and hydrate one with user-supplied originals:
 
 ```sh
 cvbench-dataset validate-source-recipe datasets/recovered-clean-videos-v1
+mkdir -p .local-datasets
 cvbench-dataset hydrate-source-recipe datasets/recovered-clean-videos-v1 \
   --source-dir "/path/to/verified/originals" \
   --output .local-datasets/recovered-clean-videos-v1
 ```
 
-Hydration requires the exact declared MP4 inventory and hashes, copies the
+Hydration requires an existing output parent plus the exact declared MP4
+inventory and hashes, copies the
 media into a new canonical package, then runs the normal dataset validator.
 The destination is never partially replaced. Source recipes are always draft,
 training-only, evaluation-ineligible, and limited to model-derived labels.

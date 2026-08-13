@@ -26,6 +26,7 @@ Pexels terms restrict standalone redistribution.
 
 ```sh
 cvbench-dataset validate-source-recipe datasets/recovered-clean-videos-v1
+mkdir -p .local-datasets
 cvbench-dataset hydrate-source-recipe datasets/recovered-clean-videos-v1 \
   --source-dir "/path/to/verified/originals" \
   --output .local-datasets/recovered-clean-videos-v1

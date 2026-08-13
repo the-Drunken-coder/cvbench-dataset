@@ -7,7 +7,6 @@ import shutil
 import stat
 import sys
 import uuid
-from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -41,14 +40,12 @@ def _directory_anchored_publication_supported() -> bool:
     return sys.platform in {"darwin", "linux"}
 
 
-def _open_or_create_directory(path: Path) -> int:
-    """Traverse an absolute path without following replaceable symlinks."""
+def _open_directory(path: Path) -> int:
+    """Open an existing absolute directory without following replaceable symlinks."""
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     directory_fd = os.open(path.anchor, flags)
     try:
         for part in path.parts[1:]:
-            with suppress(FileExistsError):
-                os.mkdir(part, mode=0o700, dir_fd=directory_fd)
             next_fd = os.open(part, flags, dir_fd=directory_fd)
             os.close(directory_fd)
             directory_fd = next_fd
@@ -73,7 +70,18 @@ def _rename_no_replace(
     *,
     source_dir_fd: int = -100,
     destination_dir_fd: int = -100,
+    expected_source: os.stat_result | None = None,
 ) -> None:
+    if expected_source is not None:
+        try:
+            actual_source = os.stat(source, dir_fd=source_dir_fd, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise DatasetError("publication source changed before rename") from exc
+        if (actual_source.st_dev, actual_source.st_ino) != (
+            expected_source.st_dev,
+            expected_source.st_ino,
+        ):
+            raise DatasetError("publication source changed before rename")
     if sys.platform == "linux":
         try:
             rename = ctypes.CDLL(None, use_errno=True).renameat2
@@ -181,7 +189,11 @@ def _assert_output_parent_unchanged(output: Path, opened_parent: os.stat_result)
         raise DatasetError("hydrate output parent changed during publication")
 
 
-def _quarantine_rejected_publication(parent_fd: int, output_name: str) -> str:
+def _quarantine_rejected_publication(
+    parent_fd: int,
+    output_name: str,
+    expected_publication: os.stat_result,
+) -> str:
     rejected_name = f".{output_name}.rejected-{uuid.uuid4().hex}"
     try:
         _rename_no_replace(
@@ -189,6 +201,7 @@ def _quarantine_rejected_publication(parent_fd: int, output_name: str) -> str:
             Path(rejected_name),
             source_dir_fd=parent_fd,
             destination_dir_fd=parent_fd,
+            expected_source=expected_publication,
         )
     except DatasetError as exc:
         raise DatasetError(
@@ -442,7 +455,7 @@ def hydrate_source_recipe(
         raise DatasetError("hydrate output must be outside the source recipe")
     if not _directory_anchored_publication_supported():
         raise DatasetError("directory-anchored hydrate publication is unsupported on this platform")
-    parent_fd = _open_or_create_directory(output.parent)
+    parent_fd = _open_directory(output.parent)
     opened_parent = os.fstat(parent_fd)
     if (
         opened_parent.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
@@ -547,19 +560,25 @@ def hydrate_source_recipe(
         _assert_hydrated_recipe_constraints(temporary, copied_report, final_hydrated)
         if final_hydrated != hydrated or _recipe_inventory(temporary) != hydrated_inventory:
             raise DatasetError("hydrated dataset changed during publication")
-        _rename_no_replace(
-            Path(temporary.name),
-            Path(output.name),
-            source_dir_fd=parent_fd,
-            destination_dir_fd=parent_fd,
-        )
+        try:
+            _rename_no_replace(
+                Path(temporary.name),
+                Path(output.name),
+                source_dir_fd=parent_fd,
+                destination_dir_fd=parent_fd,
+                expected_source=staged_directory,
+            )
+        except DatasetError as exc:
+            if "target already exists" in str(exc):
+                raise
+            raise DatasetError("hydrate staging directory changed during publication") from exc
         published = os.stat(output.name, dir_fd=parent_fd, follow_symlinks=False)
         if (
             not stat.S_ISDIR(published.st_mode)
             or (published.st_dev, published.st_ino)
             != (staged_directory.st_dev, staged_directory.st_ino)
         ):
-            rejected_name = _quarantine_rejected_publication(parent_fd, output.name)
+            rejected_name = _quarantine_rejected_publication(parent_fd, output.name, published)
             raise DatasetError(
                 "hydrate staging directory changed during publication; "
                 f"rejected content retained as {rejected_name}"
@@ -571,12 +590,29 @@ def hydrate_source_recipe(
             if published_report != hydrated or _recipe_inventory(published_root) != hydrated_inventory:
                 raise DatasetError("hydrated dataset changed during publication")
         except DatasetError as exc:
-            rejected_name = _quarantine_rejected_publication(parent_fd, output.name)
+            current_publication = os.stat(output.name, dir_fd=parent_fd, follow_symlinks=False)
+            rejected_name = _quarantine_rejected_publication(
+                parent_fd,
+                output.name,
+                current_publication,
+            )
             raise DatasetError(
                 "hydrated dataset changed during publication; "
                 f"rejected content retained as {rejected_name}"
             ) from exc
-        _assert_output_parent_unchanged(output, opened_parent)
+        try:
+            _assert_output_parent_unchanged(output, opened_parent)
+        except DatasetError as exc:
+            current_publication = os.stat(output.name, dir_fd=parent_fd, follow_symlinks=False)
+            rejected_name = _quarantine_rejected_publication(
+                parent_fd,
+                output.name,
+                current_publication,
+            )
+            raise DatasetError(
+                "hydrate output parent changed during publication; "
+                f"published content retained as {rejected_name} through the opened parent"
+            ) from exc
     finally:
         os.close(parent_fd)
     return hydrated

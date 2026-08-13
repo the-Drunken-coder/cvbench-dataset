@@ -8,7 +8,7 @@ import shutil
 import tarfile
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from .errors import DatasetError
 from .schema import validate_schema
@@ -134,8 +134,36 @@ def verify_manifest(root: Path, report: DatasetReport | None = None) -> dict[str
     return actual
 
 
-def _write_archive(root: Path, prefix: str, output: Path) -> None:
+def _write_archive_stream(root: Path, prefix: str, raw: BinaryIO) -> None:
     paths = [root, *sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix())]
+    with (
+        gzip.GzipFile(filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0) as compressed,
+        tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive,
+    ):
+        for path in paths:
+            relative = path.relative_to(root).as_posix()
+            name = prefix if relative == "." else f"{prefix}/{relative}"
+            info = tarfile.TarInfo(name)
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            info.mtime = 0
+            if path.is_dir():
+                info.type = tarfile.DIRTYPE
+                info.mode = 0o755
+                archive.addfile(info)
+            elif path.is_file():
+                info.type = tarfile.REGTYPE
+                info.mode = 0o644
+                info.size = path.stat().st_size
+                with path.open("rb") as source:
+                    archive.addfile(info, source)
+            else:
+                raise DatasetError(f"release archive cannot contain {path}")
+
+
+def _write_archive(root: Path, prefix: str, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         dir=output.parent,
@@ -144,32 +172,8 @@ def _write_archive(root: Path, prefix: str, output: Path) -> None:
     os.close(descriptor)
     temporary = Path(temporary_name)
     try:
-        with (
-            temporary.open("wb") as raw,
-            gzip.GzipFile(filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0) as compressed,
-            tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive,
-        ):
-            for path in paths:
-                relative = path.relative_to(root).as_posix()
-                name = prefix if relative == "." else f"{prefix}/{relative}"
-                info = tarfile.TarInfo(name)
-                info.uid = 0
-                info.gid = 0
-                info.uname = ""
-                info.gname = ""
-                info.mtime = 0
-                if path.is_dir():
-                    info.type = tarfile.DIRTYPE
-                    info.mode = 0o755
-                    archive.addfile(info)
-                elif path.is_file():
-                    info.type = tarfile.REGTYPE
-                    info.mode = 0o644
-                    info.size = path.stat().st_size
-                    with path.open("rb") as source:
-                        archive.addfile(info, source)
-                else:
-                    raise DatasetError(f"release archive cannot contain {path}")
+        with temporary.open("wb") as raw:
+            _write_archive_stream(root, prefix, raw)
         os.replace(temporary, output)
     finally:
         temporary.unlink(missing_ok=True)
@@ -203,6 +207,43 @@ def _files_equal(left: Path, right: Path) -> bool:
                 return True
 
 
+def _stream_sha256(stream: BinaryIO) -> str:
+    stream.seek(0)
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+    stream.seek(0)
+    return digest.hexdigest()
+
+
+def _publish_archive(stream: BinaryIO, output: Path, expected_sha256: str) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(dir=output.parent, prefix=f".{output.name}.")
+    temporary = Path(temporary_name)
+    try:
+        stream.seek(0)
+        digest = hashlib.sha256()
+        with os.fdopen(descriptor, "wb") as destination:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+                destination.write(chunk)
+            destination.flush()
+            os.fsync(destination.fileno())
+            staged = os.fstat(destination.fileno())
+        if digest.hexdigest() != expected_sha256:
+            raise DatasetError("staged release archive changed before publication")
+        current = temporary.stat(follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (staged.st_dev, staged.st_ino):
+            raise DatasetError("staged release archive changed before publication")
+        os.replace(temporary, output)
+        published = output.stat(follow_symlinks=False)
+        if (published.st_dev, published.st_ino) != (staged.st_dev, staged.st_ino):
+            raise DatasetError("release archive changed during publication")
+        if sha256_file(output) != expected_sha256:
+            raise DatasetError("release archive changed during publication")
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
     root = Path(root).resolve()
     output = Path(output).resolve()
@@ -230,23 +271,30 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
         _write_atomic(snapshot / MANIFEST_NAME, manifest_body)
         verify_manifest(snapshot, report)
         staged_archive = Path(temporary) / "release.tar.gz"
-        _write_archive(snapshot, f"{report.id}-{report.version}", staged_archive)
+        staged_stream = staged_archive.open("w+b")
+        try:
+            _write_archive_stream(snapshot, f"{report.id}-{report.version}", staged_stream)
+            staged_stream.flush()
+            os.fsync(staged_stream.fileno())
+            archive_sha256 = _stream_sha256(staged_stream)
 
-        current_report = validate_dataset(root, require_manifest=False)
-        if (
-            make_manifest(root, current_report) != manifest
-            or _release_inventory(root) != _release_inventory(snapshot)
-        ):
-            raise DatasetError("dataset changed during release build")
-        _write_atomic(root / MANIFEST_NAME, manifest_body)
-        verify_manifest(root)
-        final_report = validate_dataset(root, require_manifest=False)
-        if (
-            make_manifest(root, final_report) != manifest
-            or _release_inventory(root) != _release_inventory(snapshot)
-        ):
-            raise DatasetError("dataset changed during release publication")
-        os.replace(staged_archive, output)
+            current_report = validate_dataset(root, require_manifest=False)
+            if (
+                make_manifest(root, current_report) != manifest
+                or _release_inventory(root) != _release_inventory(snapshot)
+            ):
+                raise DatasetError("dataset changed during release build")
+            _write_atomic(root / MANIFEST_NAME, manifest_body)
+            verify_manifest(root)
+            final_report = validate_dataset(root, require_manifest=False)
+            if (
+                make_manifest(root, final_report) != manifest
+                or _release_inventory(root) != _release_inventory(snapshot)
+            ):
+                raise DatasetError("dataset changed during release publication")
+            _publish_archive(staged_stream, output, archive_sha256)
+        finally:
+            staged_stream.close()
     return {
         "dataset": {
             "id": report.id,
