@@ -399,7 +399,7 @@ def test_hydration_rejects_replaced_staging_directory(
         root.rename(stolen)
         root.mkdir()
         (root / "owner.txt").write_text("preserve me\n")
-        replacement = root
+        replacement = root.resolve()
         return result
 
     monkeypatch.setattr(source_recipe_module, "validate_dataset", validate_then_replace_staging)
