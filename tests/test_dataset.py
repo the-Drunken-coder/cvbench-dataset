@@ -609,6 +609,15 @@ def test_hydration_normalizes_staging_creation_failure(
         hydrate_source_recipe(recipe, source_dir, tmp_path / "hydrated")
 
 
+def test_hydration_rejects_undeclared_recipe_root_entries(tmp_path: Path) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    (recipe / "downloaded-video.mp4").write_bytes(b"undeclared")
+    output = tmp_path / "hydrated"
+    with pytest.raises(DatasetError, match="source recipe must contain exactly"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
+
+
 def test_hydration_detects_staging_swap_during_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -422,6 +422,10 @@ def hydrate_source_recipe(
 ) -> dict[str, Any]:
     root = Path(root).resolve()
     source_dir = Path(source_dir).resolve()
+    source_inventory = _recipe_inventory(root)
+    source_report = validate_source_recipe(root)
+    if _recipe_inventory(root) != source_inventory:
+        raise DatasetError("source recipe changed during hydration")
     requested_output = Path(output)
     if requested_output.name in {"", ".", ".."}:
         raise DatasetError(f"invalid hydrate target: {requested_output}")
@@ -485,6 +489,11 @@ def hydrate_source_recipe(
                     shutil.copy2(source, destination)
         except (OSError, shutil.Error) as exc:
             raise DatasetError(f"cannot snapshot source recipe: {exc}") from exc
+        if (
+            validate_source_recipe(root) != source_report
+            or _recipe_inventory(root) != source_inventory
+        ):
+            raise DatasetError("source recipe changed during hydration")
         snapshot_inventory = _recipe_inventory(temporary)
         copied_report = validate_source_recipe(temporary)
         if _recipe_inventory(temporary) != snapshot_inventory:
