@@ -14,7 +14,12 @@ from typing import Any, BinaryIO
 
 from .errors import DatasetError
 from .schema import validate_schema
-from .source_recipe import _assert_output_parent_unchanged, _open_directory, _rename_no_replace
+from .source_recipe import (
+    _assert_output_parent_unchanged,
+    _directory_anchored_publication_supported,
+    _open_directory,
+    _rename_no_replace,
+)
 from .validator import DatasetReport, load_descriptor, sha256_file, validate_dataset
 
 MANIFEST_NAME = "release-manifest.json"
@@ -461,6 +466,8 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
         pass
     else:
         raise DatasetError("release archive output must be outside the dataset root")
+    if not _directory_anchored_publication_supported():
+        raise DatasetError("directory-anchored release publication is unsupported on this platform")
     output.parent.mkdir(parents=True, exist_ok=True)
     parent_fd = _open_directory(output.parent)
     opened_parent = os.fstat(parent_fd)

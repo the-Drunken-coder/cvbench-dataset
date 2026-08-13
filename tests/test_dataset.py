@@ -1308,6 +1308,34 @@ def test_release_refuses_existing_output(tmp_path: Path) -> None:
     assert archive.read_bytes() == b"preserve me"
 
 
+def test_build_release_rejects_unsupported_platform_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _copy_sample(tmp_path)
+    before = {
+        path.relative_to(dataset): path.read_bytes()
+        for path in dataset.rglob("*")
+        if path.is_file()
+    }
+    output = tmp_path / "new-parent" / "release.tar.gz"
+    monkeypatch.setattr(
+        manifest_module,
+        "_directory_anchored_publication_supported",
+        lambda: False,
+    )
+
+    with pytest.raises(DatasetError, match="unsupported on this platform"):
+        build_release(dataset, output)
+
+    after = {
+        path.relative_to(dataset): path.read_bytes()
+        for path in dataset.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert not output.parent.exists()
+
+
 def test_build_release_fails_closed_for_noncertified_state(tmp_path: Path) -> None:
     dataset = _copy_sample(tmp_path)
     descriptor = yaml.safe_load((dataset / "dataset.yaml").read_text())
