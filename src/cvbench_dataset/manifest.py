@@ -240,6 +240,12 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
             raise DatasetError("dataset changed during release build")
         _write_atomic(root / MANIFEST_NAME, manifest_body)
         verify_manifest(root)
+        final_report = validate_dataset(root, require_manifest=False)
+        if (
+            make_manifest(root, final_report) != manifest
+            or _release_inventory(root) != _release_inventory(snapshot)
+        ):
+            raise DatasetError("dataset changed during release publication")
         os.replace(staged_archive, output)
     return {
         "dataset": {

@@ -454,6 +454,7 @@ def hydrate_source_recipe(
             if sha256_file(copied_video) != clip.source_sha256:
                 raise DatasetError(f"source video changed during hydration: {clip.source_filename}")
         hydrated = validate_dataset(temporary).to_dict()
+        hydrated_inventory = _recipe_inventory(temporary)
         try:
             current_parent = os.stat(output.parent, follow_symlinks=False)
         except FileNotFoundError as exc:
@@ -478,6 +479,11 @@ def hydrate_source_recipe(
             != (staged_directory.st_dev, staged_directory.st_ino)
         ):
             raise DatasetError("hydrate staging directory changed during publication")
+        if (
+            validate_dataset(temporary).to_dict() != hydrated
+            or _recipe_inventory(temporary) != hydrated_inventory
+        ):
+            raise DatasetError("hydrated dataset changed during publication")
         _rename_no_replace(
             Path(temporary.name),
             Path(output.name),

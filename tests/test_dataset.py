@@ -301,11 +301,15 @@ def test_hydration_does_not_replace_target_created_during_build(
     recipe, source_dir = _source_recipe(tmp_path)
     output = tmp_path / "hydrated"
     validate_dataset_original = source_recipe_module.validate_dataset
+    created = False
 
     def validate_then_create_competing_output(root: Path):
+        nonlocal created
         result = validate_dataset_original(root)
-        output.mkdir()
-        (output / "owner.txt").write_text("preserve me\n")
+        if not created:
+            output.mkdir()
+            (output / "owner.txt").write_text("preserve me\n")
+            created = True
         return result
 
     monkeypatch.setattr(source_recipe_module, "validate_dataset", validate_then_create_competing_output)
@@ -525,6 +529,36 @@ def test_hydration_binds_complete_snapshot_inventory(
     monkeypatch.setattr(source_recipe_module, "_recipe_inventory", inventory_then_mutate)
     output = tmp_path / "hydrated"
     with pytest.raises(DatasetError, match="source recipe changed"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
+
+
+def test_hydration_rechecks_hydrated_bytes_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    inventory_original = source_recipe_module._recipe_inventory
+    mutated = False
+
+    def inventory_then_mutate(root: Path):
+        nonlocal mutated
+        inventory = inventory_original(root)
+        root = Path(root)
+        if not (root / "source-lock.json").exists() and not mutated:
+            tracks = root / "clips" / "synthetic-clip" / "tracks.jsonl"
+            rows = [json.loads(line) for line in tracks.read_text().splitlines()]
+            rows[0]["bbox_xyxy"][0] += 0.25
+            tracks.write_text(
+                "".join(
+                    json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n" for row in rows
+                )
+            )
+            mutated = True
+        return inventory
+
+    monkeypatch.setattr(source_recipe_module, "_recipe_inventory", inventory_then_mutate)
+    output = tmp_path / "hydrated"
+    with pytest.raises(DatasetError, match="changed during publication"):
         hydrate_source_recipe(recipe, source_dir, output)
     assert not output.exists()
 
@@ -749,6 +783,28 @@ def test_release_rejects_empty_directory_added_after_snapshot(
     monkeypatch.setattr(manifest_module.shutil, "copytree", copy_then_add_directory)
     archive = tmp_path / "release.tar.gz"
     with pytest.raises(DatasetError, match="dataset changed during release build"):
+        build_release(dataset, archive)
+    assert not archive.exists()
+
+
+def test_release_rechecks_directories_immediately_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _copy_sample(tmp_path)
+    verify_original = manifest_module.verify_manifest
+    mutated = False
+
+    def verify_then_add_directory(root: Path, *args, **kwargs):
+        nonlocal mutated
+        result = verify_original(root, *args, **kwargs)
+        if Path(root).resolve() == dataset.resolve() and not mutated:
+            (dataset / "licenses" / "late-directory").mkdir()
+            mutated = True
+        return result
+
+    monkeypatch.setattr(manifest_module, "verify_manifest", verify_then_add_directory)
+    archive = tmp_path / "release.tar.gz"
+    with pytest.raises(DatasetError, match="changed during release publication"):
         build_release(dataset, archive)
     assert not archive.exists()
 
