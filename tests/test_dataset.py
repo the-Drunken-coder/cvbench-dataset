@@ -730,6 +730,26 @@ def test_hydration_quarantines_content_mutated_during_publication(
     assert len(rejected) == 1
 
 
+def test_hydration_quarantines_after_post_publication_io_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, source_dir = _source_recipe(tmp_path)
+    output = tmp_path / "hydrated"
+    validate_original = source_recipe_module.validate_dataset
+
+    def fail_published_read(root: Path, *args, **kwargs):
+        if Path(root).name == output.name:
+            raise PermissionError("fixture read denial")
+        return validate_original(root, *args, **kwargs)
+
+    monkeypatch.setattr(source_recipe_module, "validate_dataset", fail_published_read)
+    with pytest.raises(DatasetError, match="hydrated dataset changed during publication"):
+        hydrate_source_recipe(recipe, source_dir, output)
+    assert not output.exists()
+    rejected = list(tmp_path.glob(".hydrated.rejected-*"))
+    assert len(rejected) == 1
+
+
 def test_hydration_does_not_quarantine_replacement_content(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1073,6 +1093,45 @@ def test_release_publication_uses_bound_archive_stream(
     verify_release(dataset, archive)
 
 
+def test_release_hash_is_bound_during_archive_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _copy_sample(tmp_path)
+    archive = tmp_path / "release.tar.gz"
+    write_original = manifest_module._write_archive_stream
+
+    def mutate_after_write(root: Path, prefix: str, raw, **kwargs) -> None:
+        write_original(root, prefix, raw, **kwargs)
+        raw.destination.seek(0)
+        raw.destination.write(b"changed after construction")
+
+    monkeypatch.setattr(manifest_module, "_write_archive_stream", mutate_after_write)
+    with pytest.raises(DatasetError, match="staged release archive changed"):
+        build_release(dataset, archive)
+    assert not archive.exists()
+
+
+def test_release_rebinds_output_name_after_hashing_published_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _copy_sample(tmp_path)
+    archive = tmp_path / "release.tar.gz"
+    displaced = tmp_path / "displaced-release.tar.gz"
+    hash_original = manifest_module._stream_sha256
+
+    def hash_then_replace(stream) -> str:
+        digest = hash_original(stream)
+        archive.rename(displaced)
+        archive.write_bytes(b"unrelated replacement")
+        return digest
+
+    monkeypatch.setattr(manifest_module, "_stream_sha256", hash_then_replace)
+    with pytest.raises(DatasetError, match="release archive changed during publication"):
+        build_release(dataset, archive)
+    assert archive.read_bytes() == b"unrelated replacement"
+    assert displaced.is_file()
+
+
 def test_release_publication_stays_bound_to_opened_output_parent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1080,6 +1139,7 @@ def test_release_publication_stays_bound_to_opened_output_parent(
     parent = tmp_path / "publish"
     parent.mkdir()
     output = parent / "release.tar.gz"
+    output.write_bytes(b"existing archive")
     moved_parent = tmp_path / "moved-publish"
     publish_original = manifest_module._publish_archive
 
@@ -1094,7 +1154,16 @@ def test_release_publication_stays_bound_to_opened_output_parent(
         build_release(dataset, output)
     assert not output.exists()
     assert (parent / "owner.txt").read_text() == "replacement parent\n"
-    assert (moved_parent / "release.tar.gz").is_file()
+    assert (moved_parent / "release.tar.gz").read_bytes() == b"existing archive"
+
+
+def test_release_refuses_existing_output(tmp_path: Path) -> None:
+    dataset = _copy_sample(tmp_path)
+    archive = tmp_path / "release.tar.gz"
+    archive.write_bytes(b"preserve me")
+    with pytest.raises(DatasetError, match="already exists"):
+        build_release(dataset, archive)
+    assert archive.read_bytes() == b"preserve me"
 
 
 def test_build_release_fails_closed_for_noncertified_state(tmp_path: Path) -> None:

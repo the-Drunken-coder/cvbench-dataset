@@ -14,7 +14,7 @@ from typing import Any, BinaryIO
 
 from .errors import DatasetError
 from .schema import validate_schema
-from .source_recipe import _assert_output_parent_unchanged, _open_directory
+from .source_recipe import _assert_output_parent_unchanged, _open_directory, _rename_no_replace
 from .validator import DatasetReport, load_descriptor, sha256_file, validate_dataset
 
 MANIFEST_NAME = "release-manifest.json"
@@ -157,6 +157,22 @@ class _HashingReader:
         self.bytes_read += len(chunk)
         self.digest.update(chunk)
         return chunk
+
+
+class _HashingWriter:
+    def __init__(self, destination: BinaryIO) -> None:
+        self.destination = destination
+        self.bytes_written = 0
+        self.digest = hashlib.sha256()
+
+    def write(self, data: bytes) -> int:
+        written = self.destination.write(data)
+        self.bytes_written += written
+        self.digest.update(data[:written])
+        return written
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.destination, name)
 
 
 def _write_archive_stream(
@@ -317,17 +333,18 @@ def _publish_archive(
             raise DatasetError("staged release archive changed before publication")
         try:
             if parent_fd is None:
-                os.replace(output.parent / temporary_name, output)
+                _rename_no_replace(output.parent / temporary_name, output, expected_source=staged)
                 published_descriptor = os.open(
                     output,
                     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
                 )
             else:
-                os.replace(
-                    temporary_name,
-                    output.name,
-                    src_dir_fd=parent_fd,
-                    dst_dir_fd=parent_fd,
+                _rename_no_replace(
+                    Path(temporary_name),
+                    Path(output.name),
+                    source_dir_fd=parent_fd,
+                    destination_dir_fd=parent_fd,
+                    expected_source=staged,
                 )
                 published_descriptor = os.open(
                     output.name,
@@ -343,6 +360,13 @@ def _publish_archive(
             (published.st_dev, published.st_ino) != (staged.st_dev, staged.st_ino)
             or published_sha256 != expected_sha256
         ):
+            raise DatasetError("release archive changed during publication")
+        rebound = os.stat(
+            output.name if parent_fd is not None else output,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        if (rebound.st_dev, rebound.st_ino) != (staged.st_dev, staged.st_ino):
             raise DatasetError("release archive changed during publication")
     finally:
         with suppress(FileNotFoundError):
@@ -393,17 +417,18 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
             staged_archive = Path(temporary) / "release.tar.gz"
             staged_stream = staged_archive.open("w+b")
             try:
+                hashing_stream = _HashingWriter(staged_stream)
                 _write_archive_stream(
                     snapshot,
                     f"{report.id}-{report.version}",
-                    staged_stream,
+                    hashing_stream,
                     expected_inventory=snapshot_inventory,
                     expected_files=expected_archive_files,
                 )
                 staged_stream.flush()
                 os.fsync(staged_stream.fileno())
-                archive_sha256 = _stream_sha256(staged_stream)
-                archive_bytes = os.fstat(staged_stream.fileno()).st_size
+                archive_sha256 = hashing_stream.digest.hexdigest()
+                archive_bytes = hashing_stream.bytes_written
 
                 current_report = validate_dataset(root, require_manifest=False)
                 if (
@@ -420,12 +445,16 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
                 ):
                     raise DatasetError("dataset changed during release publication")
                 _assert_output_parent_unchanged(output, opened_parent)
-                _publish_archive(
-                    staged_stream,
-                    output,
-                    archive_sha256,
-                    parent_fd=parent_fd,
-                )
+                try:
+                    _publish_archive(
+                        staged_stream,
+                        output,
+                        archive_sha256,
+                        parent_fd=parent_fd,
+                    )
+                except DatasetError:
+                    _assert_output_parent_unchanged(output, opened_parent)
+                    raise
                 _assert_output_parent_unchanged(output, opened_parent)
             finally:
                 staged_stream.close()

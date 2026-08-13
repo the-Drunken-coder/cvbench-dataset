@@ -598,7 +598,7 @@ def hydrate_source_recipe(
             _assert_hydrated_recipe_constraints(published_root, copied_report, published_report)
             if published_report != hydrated or _recipe_inventory(published_root) != hydrated_inventory:
                 raise DatasetError("hydrated dataset changed during publication")
-        except DatasetError as exc:
+        except (DatasetError, OSError) as exc:
             rejected_name = _quarantine_rejected_publication(
                 parent_fd,
                 output.name,
