@@ -1008,6 +1008,23 @@ def test_release_rechecks_directories_immediately_before_publication(
     assert not archive.exists()
 
 
+def test_release_binds_snapshot_hashes_through_archive_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = _copy_sample(tmp_path)
+    archive = tmp_path / "release.tar.gz"
+    write_original = manifest_module._write_archive_stream
+
+    def mutate_snapshot_before_write(root: Path, prefix: str, raw, **kwargs) -> None:
+        (root / "clips" / "synthetic-clip" / "video.mp4").write_bytes(b"changed after verify")
+        write_original(root, prefix, raw, **kwargs)
+
+    monkeypatch.setattr(manifest_module, "_write_archive_stream", mutate_snapshot_before_write)
+    with pytest.raises(DatasetError, match="changed during archive construction"):
+        build_release(dataset, archive)
+    assert not archive.exists()
+
+
 def test_release_publication_uses_bound_archive_stream(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

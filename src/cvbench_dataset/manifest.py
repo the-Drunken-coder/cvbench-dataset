@@ -55,6 +55,16 @@ def _release_files(root: Path) -> list[Path]:
     return sorted(files, key=lambda path: path.relative_to(root).as_posix())
 
 
+def _path_kind(path: Path) -> str:
+    if path.is_symlink():
+        return "symlink"
+    if path.is_dir():
+        return "directory"
+    if path.is_file():
+        return "file"
+    return "missing"
+
+
 def _release_inventory(root: Path) -> list[tuple[str, str]]:
     """Describe every archived path except the generated root manifest."""
     inventory = []
@@ -62,8 +72,7 @@ def _release_inventory(root: Path) -> list[tuple[str, str]]:
         relative = path.relative_to(root).as_posix()
         if relative == MANIFEST_NAME:
             continue
-        kind = "symlink" if path.is_symlink() else "directory" if path.is_dir() else "file"
-        inventory.append((relative, kind))
+        inventory.append((relative, _path_kind(path)))
     return sorted(inventory)
 
 
@@ -134,13 +143,42 @@ def verify_manifest(root: Path, report: DatasetReport | None = None) -> dict[str
     return actual
 
 
-def _write_archive_stream(root: Path, prefix: str, raw: BinaryIO) -> None:
-    paths = [root, *sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix())]
+class _HashingReader:
+    def __init__(self, source: BinaryIO) -> None:
+        self.source = source
+        self.bytes_read = 0
+        self.digest = hashlib.sha256()
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self.source.read(size)
+        self.bytes_read += len(chunk)
+        self.digest.update(chunk)
+        return chunk
+
+
+def _write_archive_stream(
+    root: Path,
+    prefix: str,
+    raw: BinaryIO,
+    *,
+    expected_inventory: list[tuple[str, str]] | None = None,
+    expected_files: dict[str, tuple[int, str]] | None = None,
+) -> None:
+    inventory = (
+        expected_inventory
+        if expected_inventory is not None
+        else sorted([*_release_inventory(root), (MANIFEST_NAME, "file")])
+    )
+    if expected_files is not None:
+        inventory_files = {relative for relative, kind in inventory if kind == "file"}
+        if inventory_files != expected_files.keys():
+            raise DatasetError("snapshot file inventory changed before archive construction")
+    entries = [(root, "directory"), *((root / relative, kind) for relative, kind in inventory)]
     with (
         gzip.GzipFile(filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0) as compressed,
         tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive,
     ):
-        for path in paths:
+        for path, expected_kind in entries:
             relative = path.relative_to(root).as_posix()
             name = prefix if relative == "." else f"{prefix}/{relative}"
             info = tarfile.TarInfo(name)
@@ -149,16 +187,34 @@ def _write_archive_stream(root: Path, prefix: str, raw: BinaryIO) -> None:
             info.uname = ""
             info.gname = ""
             info.mtime = 0
-            if path.is_dir():
+            actual_kind = _path_kind(path)
+            if actual_kind != expected_kind:
+                raise DatasetError(f"snapshot path changed during archive construction: {relative}")
+            if actual_kind == "directory":
                 info.type = tarfile.DIRTYPE
                 info.mode = 0o755
                 archive.addfile(info)
-            elif path.is_file():
+            elif actual_kind == "file":
                 info.type = tarfile.REGTYPE
                 info.mode = 0o644
-                info.size = path.stat().st_size
+                expected = expected_files.get(relative) if expected_files is not None else None
+                info.size = expected[0] if expected is not None else path.stat().st_size
                 with path.open("rb") as source:
-                    archive.addfile(info, source)
+                    reader = _HashingReader(source)
+                    try:
+                        archive.addfile(info, reader)
+                    except OSError as exc:
+                        if expected is None:
+                            raise
+                        raise DatasetError(
+                            f"snapshot file changed during archive construction: {relative}"
+                        ) from exc
+                if expected is not None and (
+                    reader.bytes_read != expected[0] or reader.digest.hexdigest() != expected[1]
+                ):
+                    raise DatasetError(
+                        f"snapshot file changed during archive construction: {relative}"
+                    )
             else:
                 raise DatasetError(f"release archive cannot contain {path}")
 
@@ -270,10 +326,24 @@ def build_release(root: str | Path, output: str | Path) -> dict[str, Any]:
         manifest_body = _canonical_json(manifest)
         _write_atomic(snapshot / MANIFEST_NAME, manifest_body)
         verify_manifest(snapshot, report)
+        snapshot_inventory = sorted([*_release_inventory(snapshot), (MANIFEST_NAME, "file")])
+        expected_archive_files = {
+            entry["path"]: (entry["bytes"], entry["sha256"]) for entry in manifest["files"]
+        }
+        expected_archive_files[MANIFEST_NAME] = (
+            len(manifest_body),
+            hashlib.sha256(manifest_body).hexdigest(),
+        )
         staged_archive = Path(temporary) / "release.tar.gz"
         staged_stream = staged_archive.open("w+b")
         try:
-            _write_archive_stream(snapshot, f"{report.id}-{report.version}", staged_stream)
+            _write_archive_stream(
+                snapshot,
+                f"{report.id}-{report.version}",
+                staged_stream,
+                expected_inventory=snapshot_inventory,
+                expected_files=expected_archive_files,
+            )
             staged_stream.flush()
             os.fsync(staged_stream.fileno())
             archive_sha256 = _stream_sha256(staged_stream)
