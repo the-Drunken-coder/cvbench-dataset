@@ -388,7 +388,6 @@ def hydrate_source_recipe(
         os.close(parent_fd)
         raise
     temporary = _directory_fd_path(parent_fd) / temporary_name
-    cleanup_staging = True
     try:
         try:
             for name in (
@@ -455,14 +454,12 @@ def hydrate_source_recipe(
                 follow_symlinks=False,
             )
         except FileNotFoundError as exc:
-            cleanup_staging = False
             raise DatasetError("hydrate staging directory changed during publication") from exc
         if (
             not stat.S_ISDIR(current_staging.st_mode)
             or (current_staging.st_dev, current_staging.st_ino)
             != (staged_directory.st_dev, staged_directory.st_ino)
         ):
-            cleanup_staging = False
             raise DatasetError("hydrate staging directory changed during publication")
         _rename_no_replace(
             Path(temporary.name),
@@ -470,25 +467,6 @@ def hydrate_source_recipe(
             source_dir_fd=parent_fd,
             destination_dir_fd=parent_fd,
         )
-    except BaseException:
-        if cleanup_staging:
-            try:
-                current_staging = os.stat(
-                    temporary_name,
-                    dir_fd=parent_fd,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                cleanup_staging = False
-            else:
-                cleanup_staging = (
-                    stat.S_ISDIR(current_staging.st_mode)
-                    and (current_staging.st_dev, current_staging.st_ino)
-                    == (staged_directory.st_dev, staged_directory.st_ino)
-                )
-        if cleanup_staging:
-            shutil.rmtree(_directory_fd_path(parent_fd) / temporary_name, ignore_errors=True)
-        raise
     finally:
         os.close(parent_fd)
     return hydrated

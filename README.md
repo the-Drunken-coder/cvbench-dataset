@@ -102,6 +102,8 @@ Hydration requires the exact declared MP4 inventory and hashes, copies the
 media into a new canonical package, then runs the normal dataset validator.
 The destination is never partially replaced. Source recipes are always draft,
 training-only, evaluation-ineligible, and limited to model-derived labels.
+Failed hydration leaves its private hidden staging directory in the output
+parent for manual inspection and cleanup; it never path-deletes failed staging.
 
 The archive contains one explicit `<dataset-id>-<version>/` root. Consumers
 lock its SHA-256, extract it into an ignored data directory, and verify the
