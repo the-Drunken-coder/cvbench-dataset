@@ -19,6 +19,72 @@ TOP_LEVEL_NAMES = {"artifacts", "clips", "dataset.yaml", "licenses", "release-ma
 MODEL_ORIGINS = {"model_assisted", "model_generated"}
 
 
+def _decode_coco_rle(counts: str, context: str) -> list[int]:
+    """Decode the compact COCO RLE string without requiring annotation dependencies."""
+    runs: list[int] = []
+    position = 0
+    while position < len(counts):
+        value = 0
+        shift = 0
+        while True:
+            code = ord(counts[position]) - 48
+            position += 1
+            if not 0 <= code <= 63:
+                raise DatasetError(f"{context}: mask_rle counts contain an invalid character")
+            value |= (code & 0x1F) << shift
+            shift += 5
+            if not code & 0x20:
+                if code & 0x10:
+                    value |= -1 << shift
+                break
+            if position >= len(counts):
+                raise DatasetError(f"{context}: mask_rle counts are truncated")
+        if len(runs) > 2:
+            value += runs[-2]
+        if value < 0:
+            raise DatasetError(f"{context}: mask_rle contains a negative run")
+        runs.append(value)
+    return runs
+
+
+def _mask_bbox(runs: list[int], height: int, context: str) -> list[int]:
+    offset = 0
+    bounds: list[int] | None = None
+    for index, length in enumerate(runs):
+        end = offset + length
+        if index % 2 and length:
+            start_x, start_y = divmod(offset, height)
+            end_x, end_y = divmod(end - 1, height)
+            low_y, high_y = (0, height - 1) if start_x != end_x else (start_y, end_y)
+            if bounds is None:
+                bounds = [start_x, low_y, end_x + 1, high_y + 1]
+            else:
+                bounds = [
+                    min(bounds[0], start_x),
+                    min(bounds[1], low_y),
+                    max(bounds[2], end_x + 1),
+                    max(bounds[3], high_y + 1),
+                ]
+        offset = end
+    if bounds is None:
+        raise DatasetError(f"{context}: mask_rle has no foreground pixels")
+    return bounds
+
+
+def _validate_mask(row: dict[str, Any], media: dict[str, Any], context: str) -> None:
+    mask = row.get("mask_rle")
+    if mask is None:
+        return
+    expected_size = [media["height"], media["width"]]
+    if mask["size"] != expected_size:
+        raise DatasetError(f"{context}: mask_rle size does not match the declared media")
+    runs = _decode_coco_rle(mask["counts"], context)
+    if sum(runs) != media["height"] * media["width"]:
+        raise DatasetError(f"{context}: mask_rle runs do not cover the declared media")
+    if row["bbox_xyxy"] != _mask_bbox(runs, media["height"], context):
+        raise DatasetError(f"{context}: bbox_xyxy does not match mask_rle bounds")
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -220,6 +286,7 @@ def _validate_tracks(
             raise DatasetError(f"{context}: bbox coordinates must be finite")
         if not (0 <= box[0] < box[2] <= media["width"] and 0 <= box[1] < box[3] <= media["height"]):
             raise DatasetError(f"{context}: bbox_xyxy lies outside the declared media dimensions")
+        _validate_mask(row, media, context)
 
         confidence = row.get("confidence")
         if confidence is not None and not math.isfinite(confidence):

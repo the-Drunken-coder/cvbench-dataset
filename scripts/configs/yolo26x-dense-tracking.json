@@ -1,0 +1,56 @@
+{
+  "schema_version": "cvbench.dense-tracking-config/v1",
+  "model": {
+    "name": "Ultralytics YOLO26x-seg COCO",
+    "version": "YOLO26x-seg / ultralytics 8.4.120",
+    "weights_uri": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26x-seg.pt",
+    "weights_sha256": "92b3de0065766a17180d6219858717dc9d03cdce8a3ca9576c97fd75aabb64f3",
+    "license": {
+      "spdx": "AGPL-3.0-only",
+      "url": "https://github.com/ultralytics/ultralytics/blob/v8.4.120/LICENSE"
+    }
+  },
+  "reid_model": {
+    "name": "Ultralytics YOLO26n-cls COCO",
+    "version": "YOLO26n-cls / ultralytics 8.4.120",
+    "weights_uri": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n-cls.pt",
+    "weights_sha256": "0dd6f8dbc448870ac98a3cbb7156f923f7ce21fed3755d4019169ffffd279e81",
+    "license": {
+      "spdx": "AGPL-3.0-only",
+      "url": "https://github.com/ultralytics/ultralytics/blob/v8.4.120/LICENSE"
+    }
+  },
+  "inference": {
+    "classes": {
+      "0": "person",
+      "16": "dog"
+    },
+    "confidence_threshold": 0.05,
+    "iou_threshold": 0.7,
+    "image_size": 1280,
+    "maximum_detections": 100,
+    "retina_masks": true,
+    "video_stride": 1
+  },
+  "tracker": {
+    "tracker_type": "tracktrack",
+    "track_high_thresh": 0.35,
+    "track_low_thresh": 0.1,
+    "new_track_thresh": 0.35,
+    "track_buffer": 90,
+    "match_thresh": 0.7,
+    "lost_match_thr": 0.85,
+    "iou_weight": 0.5,
+    "reid_weight": 0.5,
+    "conf_weight": 0.1,
+    "angle_weight": 0.05,
+    "penalty_p": 0.2,
+    "penalty_q": 0.4,
+    "reduce_step": 0.05,
+    "tai_thr": 0.55,
+    "min_track_len": 1,
+    "gmc_method": "sparseOptFlow",
+    "with_reid": true,
+    "model": "<reid-weights>"
+  }
+}

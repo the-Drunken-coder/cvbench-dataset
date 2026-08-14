@@ -1,0 +1,448 @@
+#!/usr/bin/env python3
+"""Generate native-cadence instance masks and tracks for the recovered clips."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import yaml
+from pycocotools import mask as mask_utils
+from ultralytics import YOLO
+from ultralytics import __version__ as ultralytics_version
+
+from cvbench_dataset import validate_source_recipe
+
+CONFIG_ARTIFACT = "artifacts/yolo26x-dense-tracking.json"
+DATASET_ID = "recovered-clean-videos-v1"
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict):
+        raise ValueError(f"expected a JSON object: {path}")
+    return value
+
+
+def canonical_json(value: dict[str, Any]) -> bytes:
+    return (json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n").encode()
+
+
+def source_timestamp_ns(frame_index: int, numerator: int, denominator: int) -> int:
+    scaled = frame_index * 1_000_000_000 * denominator
+    return (scaled + numerator // 2) // numerator
+
+
+def encode_mask(mask: np.ndarray) -> tuple[dict[str, Any], list[int]]:
+    encoded = mask_utils.encode(np.asfortranarray(mask.astype(np.uint8)))
+    counts = encoded["counts"]
+    if not isinstance(counts, bytes):
+        raise ValueError("pycocotools returned non-canonical mask counts")
+    x, y, width, height = (int(round(value)) for value in mask_utils.toBbox(encoded))
+    if width <= 0 or height <= 0:
+        raise ValueError("model returned an empty instance mask")
+    return (
+        {"size": [int(encoded["size"][0]), int(encoded["size"][1])], "counts": counts.decode("ascii")},
+        [x, y, x + width, y + height],
+    )
+
+
+def tracker_yaml(config: dict[str, Any], output: Path, reid_weights: Path) -> Path:
+    path = output / "tracktrack.yaml"
+    tracker = dict(config["tracker"])
+    tracker["model"] = str(reid_weights)
+    path.write_text(yaml.safe_dump(tracker, sort_keys=False))
+    return path
+
+
+def verified_sources(dataset_root: Path, source_dir: Path) -> dict[str, Path]:
+    source_lock = load_json(dataset_root / "source-lock.json")
+    expected_names = {clip["filename"] for clip in source_lock["clips"]}
+    actual_names = {
+        path.name
+        for path in source_dir.iterdir()
+        if path.is_file() and path.suffix.lower() == ".mp4"
+    }
+    if actual_names != expected_names:
+        raise ValueError(
+            f"source MP4 inventory mismatch: expected {sorted(expected_names)}, found {sorted(actual_names)}"
+        )
+    verified: dict[str, Path] = {}
+    for clip in source_lock["clips"]:
+        path = source_dir / clip["filename"]
+        if sha256_file(path) != clip["sha256"]:
+            raise ValueError(f"source hash mismatch: {path}")
+        verified[clip["id"]] = path
+    return verified
+
+
+def frame_rows(
+    result: Any,
+    *,
+    clip_id: str,
+    frame_index: int,
+    source: dict[str, Any],
+    class_names: dict[int, str],
+    run_id: str,
+    track_classes: dict[int, str],
+) -> list[dict[str, Any]]:
+    boxes = result.boxes
+    masks = result.masks
+    if not len(boxes) or boxes.id is None:
+        return []
+    if masks is None or len(masks.data) != len(boxes):
+        raise ValueError(f"{clip_id} frame {frame_index}: tracked boxes and masks do not align")
+    media = source["media"]
+    timestamp = source_timestamp_ns(frame_index, media["fps_numerator"], media["fps_denominator"])
+    rows: list[dict[str, Any]] = []
+    for index, (track_value, class_value, confidence_value) in enumerate(
+        zip(boxes.id.tolist(), boxes.cls.tolist(), boxes.conf.tolist(), strict=True)
+    ):
+        numeric_track_id = int(track_value)
+        numeric_class_id = int(class_value)
+        class_id = class_names.get(numeric_class_id)
+        if class_id is None:
+            raise ValueError(f"{clip_id} frame {frame_index}: unexpected class {numeric_class_id}")
+        previous_class = track_classes.setdefault(numeric_track_id, class_id)
+        if previous_class != class_id:
+            raise ValueError(f"{clip_id}: track {numeric_track_id} changed class")
+        mask = masks.data[index].detach().cpu().numpy() > 0.5
+        if mask.shape != (media["height"], media["width"]):
+            import cv2
+
+            mask = cv2.resize(
+                mask.astype(np.uint8),
+                (media["width"], media["height"]),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+        mask_rle, bbox = encode_mask(mask)
+        rows.append(
+            {
+                "schema_version": "cvbench.track-annotation/v1",
+                "clip_id": clip_id,
+                "frame_index": frame_index,
+                "source_timestamp_ns": timestamp,
+                "track_id": f"{class_id}-{numeric_track_id:04d}",
+                "class_id": class_id,
+                "bbox_xyxy": bbox,
+                "mask_rle": mask_rle,
+                "confidence": round(float(confidence_value), 6),
+                "occlusion": "unknown",
+                "truncated": (
+                    bbox[0] == 0
+                    or bbox[1] == 0
+                    or bbox[2] == media["width"]
+                    or bbox[3] == media["height"]
+                ),
+                "label_origin": {"kind": "model_generated", "model_run_ids": [run_id]},
+            }
+        )
+    return sorted(rows, key=lambda row: row["track_id"])
+
+
+def process_clip(
+    model: YOLO,
+    *,
+    dataset_root: Path,
+    clip_id: str,
+    video: Path,
+    output_root: Path,
+    config: dict[str, Any],
+    tracker_path: Path,
+    device: str,
+) -> dict[str, Any]:
+    source = load_json(dataset_root / "clips" / clip_id / "source.json")
+    run_id = f"yolo26x-seg-tracktrack-{clip_id}"
+    class_names = {int(key): value for key, value in config["inference"]["classes"].items()}
+    inference = config["inference"]
+    track_classes: dict[int, str] = {}
+    rows: list[dict[str, Any]] = []
+    frame_count = 0
+    results = model.track(
+        source=str(video),
+        stream=True,
+        persist=False,
+        tracker=str(tracker_path),
+        device=device,
+        classes=sorted(class_names),
+        conf=inference["confidence_threshold"],
+        iou=inference["iou_threshold"],
+        imgsz=inference["image_size"],
+        max_det=inference["maximum_detections"],
+        retina_masks=inference["retina_masks"],
+        vid_stride=inference["video_stride"],
+        save=False,
+        verbose=False,
+    )
+    for frame_index, result in enumerate(results):
+        rows.extend(
+            frame_rows(
+                result,
+                clip_id=clip_id,
+                frame_index=frame_index,
+                source=source,
+                class_names=class_names,
+                run_id=run_id,
+                track_classes=track_classes,
+            )
+        )
+        frame_count += 1
+        if frame_count % 100 == 0:
+            print(f"{clip_id}: {frame_count}/{source['media']['frame_count']} frames", flush=True)
+    if frame_count != source["media"]["frame_count"]:
+        raise ValueError(
+            f"{clip_id}: processed {frame_count} frames, expected {source['media']['frame_count']}"
+        )
+    clip_output = output_root / clip_id
+    clip_output.mkdir()
+    tracks = b"".join(canonical_json(row) for row in rows)
+    (clip_output / "tracks.jsonl").write_bytes(tracks)
+    summary = {
+        "clip_id": clip_id,
+        "frame_count": frame_count,
+        "annotation_rows": len(rows),
+        "track_count": len({row["track_id"] for row in rows}),
+        "tracks_sha256": hashlib.sha256(tracks).hexdigest(),
+    }
+    (clip_output / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(summary, sort_keys=True), flush=True)
+    return summary
+
+
+def updated_source(
+    source: dict[str, Any],
+    *,
+    clip_id: str,
+    config: dict[str, Any],
+    config_sha256: str,
+    weights_sha256: str,
+    raw_output_sha256: str,
+    generator_revision: str,
+) -> dict[str, Any]:
+    run_id = f"yolo26x-seg-tracktrack-{clip_id}"
+    command = [
+        "python",
+        "scripts/generate_dense_tracks.py",
+        "--dataset-root",
+        f"datasets/{DATASET_ID}",
+        "--source-dir",
+        "<verified-originals>",
+        "--weights",
+        "<sha256-pinned-yolo26x-seg.pt>",
+        "--reid-weights",
+        "<sha256-pinned-yolo26n-cls.pt>",
+        "--device",
+        "mps",
+        "--apply",
+    ]
+    source["model_runs"] = [
+        {
+            "run_id": run_id,
+            "model_name": f"{config['model']['name']} with {config['reid_model']['name']} ReID",
+            "model_version": (
+                f"{config['model']['version']} + {config['reid_model']['version']}"
+            ),
+            "weights_uri": config["model"]["weights_uri"],
+            "weights_sha256": weights_sha256,
+            "code_revision": generator_revision,
+            "config_sha256": config_sha256,
+            "config_file": CONFIG_ARTIFACT,
+            "raw_output_sha256": raw_output_sha256,
+            "command": command,
+            "license": config["model"]["license"],
+        }
+    ]
+    source["transformations"] = [
+        {
+            "kind": "dense_model_annotation",
+            "description": (
+                "Processed every native source frame for person and dog instances; media bytes are unchanged."
+            ),
+            "tool": f"scripts/generate_dense_tracks.py at {generator_revision}",
+            "config_sha256": config_sha256,
+            "config_file": CONFIG_ARTIFACT,
+        }
+    ]
+    return source
+
+
+def stage_dataset(
+    dataset_root: Path,
+    output_root: Path,
+    config_path: Path,
+    weights_path: Path,
+    reid_weights_path: Path,
+    generator_revision: str,
+) -> Path:
+    stage_parent = Path(tempfile.mkdtemp(prefix="cvbench-dense-stage-", dir=dataset_root.parent))
+    stage = stage_parent / dataset_root.name
+    shutil.copytree(dataset_root, stage)
+    config = load_json(config_path)
+    config_bytes = canonical_json(config)
+    config_sha256 = hashlib.sha256(config_bytes).hexdigest()
+    weights_sha256 = sha256_file(weights_path)
+    reid_weights_sha256 = sha256_file(reid_weights_path)
+    if weights_sha256 != config["model"]["weights_sha256"]:
+        raise ValueError("detector weights do not match the pinned config hash")
+    if reid_weights_sha256 != config["reid_model"]["weights_sha256"]:
+        raise ValueError("ReID weights do not match the pinned config hash")
+
+    descriptor_path = stage / "dataset.yaml"
+    descriptor = yaml.safe_load(descriptor_path.read_text())
+    descriptor["version"] = "0.2.0"
+    descriptor["title"] = "Recovered clean videos dense segmentation tracks"
+    descriptor["description"] = (
+        "Five hash-pinned Pixabay and Pexels videos processed at native cadence with YOLO26x-seg and "
+        "TrackTrack appearance association. Dense model output is pending human review and is not "
+        "ground truth."
+    )
+    descriptor["ontology"]["classes"] = [
+        {"id": "person", "description": "Model-generated mask and track for a visible person."},
+        {"id": "dog", "description": "Model-generated mask and track for a visible dog."},
+    ]
+    descriptor_path.write_text(yaml.safe_dump(descriptor, sort_keys=False))
+
+    artifacts = stage / "artifacts"
+    for path in artifacts.iterdir():
+        if path.is_file():
+            path.unlink()
+    (stage / CONFIG_ARTIFACT).write_bytes(config_bytes)
+
+    for clip in descriptor["clips"]:
+        clip_id = clip["id"]
+        clip_root = stage / clip["path"]
+        generated_tracks = output_root / clip_id / "tracks.jsonl"
+        tracks_sha256 = sha256_file(generated_tracks)
+        shutil.copyfile(generated_tracks, clip_root / "tracks.jsonl")
+        source_path = clip_root / "source.json"
+        source = updated_source(
+            load_json(source_path),
+            clip_id=clip_id,
+            config=config,
+            config_sha256=config_sha256,
+            weights_sha256=weights_sha256,
+            raw_output_sha256=tracks_sha256,
+            generator_revision=generator_revision,
+        )
+        source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
+    validate_source_recipe(stage)
+    return stage
+
+
+def apply_stage(dataset_root: Path, stage: Path) -> None:
+    for relative in ("dataset.yaml", CONFIG_ARTIFACT):
+        destination = dataset_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(stage / relative, destination)
+    old_config = dataset_root / "artifacts" / "recovered-training-config.json"
+    old_config.unlink(missing_ok=True)
+    descriptor = yaml.safe_load((dataset_root / "dataset.yaml").read_text())
+    for clip in descriptor["clips"]:
+        for filename in ("tracks.jsonl", "source.json"):
+            relative = Path(clip["path"]) / filename
+            os.replace(stage / relative, dataset_root / relative)
+    validate_source_recipe(dataset_root)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset-root", type=Path, required=True)
+    parser.add_argument("--source-dir", type=Path, required=True)
+    parser.add_argument("--weights", type=Path, required=True)
+    parser.add_argument("--reid-weights", type=Path, required=True)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("scripts/configs/yolo26x-dense-tracking.json"),
+    )
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--generator-revision", required=True)
+    parser.add_argument("--device", default="mps")
+    parser.add_argument("--apply", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    dataset_root = args.dataset_root.resolve()
+    source_dir = args.source_dir.resolve()
+    weights = args.weights.resolve()
+    reid_weights = args.reid_weights.resolve()
+    config_path = args.config.resolve()
+    output_root = args.output_dir.resolve()
+    if output_root.exists():
+        raise FileExistsError(f"output already exists: {output_root}")
+    if not weights.is_file():
+        raise FileNotFoundError(weights)
+    if not reid_weights.is_file():
+        raise FileNotFoundError(reid_weights)
+    if ultralytics_version != "8.4.120":
+        raise RuntimeError(f"expected ultralytics 8.4.120, found {ultralytics_version}")
+    report = validate_source_recipe(dataset_root)
+    if report.id != DATASET_ID:
+        raise ValueError(f"this generator only accepts {DATASET_ID}")
+    sources = verified_sources(dataset_root, source_dir)
+    config = load_json(config_path)
+    weights_sha256 = sha256_file(weights)
+    if weights_sha256 != config["model"]["weights_sha256"]:
+        raise ValueError("detector weights do not match the pinned config hash")
+    reid_weights_sha256 = sha256_file(reid_weights)
+    if reid_weights_sha256 != config["reid_model"]["weights_sha256"]:
+        raise ValueError("ReID weights do not match the pinned config hash")
+    output_root.mkdir(parents=True)
+    tracker_path = tracker_yaml(config, output_root, reid_weights)
+    model = YOLO(str(weights))
+    summaries = [
+        process_clip(
+            model,
+            dataset_root=dataset_root,
+            clip_id=clip_id,
+            video=video,
+            output_root=output_root,
+            config=config,
+            tracker_path=tracker_path,
+            device=args.device,
+        )
+        for clip_id, video in sources.items()
+    ]
+    manifest = {
+        "schema_version": "cvbench.dense-tracking-run/v1",
+        "generator_revision": args.generator_revision,
+        "weights_sha256": weights_sha256,
+        "reid_weights_sha256": reid_weights_sha256,
+        "config_sha256": hashlib.sha256(canonical_json(config)).hexdigest(),
+        "clips": summaries,
+    }
+    (output_root / "run.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    if args.apply:
+        stage = stage_dataset(
+            dataset_root,
+            output_root,
+            config_path,
+            weights,
+            reid_weights,
+            args.generator_revision,
+        )
+        try:
+            apply_stage(dataset_root, stage)
+        finally:
+            shutil.rmtree(stage.parent)
+
+
+if __name__ == "__main__":
+    main()

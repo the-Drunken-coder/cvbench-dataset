@@ -148,6 +148,41 @@ def _write_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
+def _encode_coco_rle(runs: list[int]) -> str:
+    encoded: list[str] = []
+    for index, original in enumerate(runs):
+        value = original - runs[index - 2] if index > 2 else original
+        while True:
+            code = value & 0x1F
+            value >>= 5
+            more = value != (-1 if code & 0x10 else 0)
+            if more:
+                code |= 0x20
+            encoded.append(chr(code + 48))
+            if not more:
+                break
+    return "".join(encoded)
+
+
+def _rectangle_rle() -> dict:
+    pixels = [0] * (16 * 16)
+    for x in range(2, 9):
+        for y in range(2, 13):
+            pixels[x * 16 + y] = 1
+    runs: list[int] = []
+    current = 0
+    length = 0
+    for pixel in pixels:
+        if pixel == current:
+            length += 1
+        else:
+            runs.append(length)
+            current = pixel
+            length = 1
+    runs.append(length)
+    return {"size": [16, 16], "counts": _encode_coco_rle(runs)}
+
+
 def test_init_creates_a_valid_empty_draft(tmp_path: Path) -> None:
     root = tmp_path / "new-dataset"
     result = init_dataset(
@@ -894,6 +929,34 @@ def test_source_recipe_rejects_non_finite_confidence(tmp_path: Path) -> None:
     )
     with pytest.raises(DatasetError, match="confidence must be finite"):
         validate_source_recipe(recipe)
+
+
+def test_canonical_validation_accepts_compact_source_resolution_mask(tmp_path: Path) -> None:
+    dataset = _draft_destination(tmp_path)
+    tracks = dataset / "clips" / "synthetic-clip" / "tracks.jsonl"
+    rows = [json.loads(line) for line in tracks.read_text().splitlines()]
+    rows[0]["mask_rle"] = _rectangle_rle()
+    tracks.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    assert validate_dataset(dataset, require_manifest=False).annotation_rows == 2
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda row: row["mask_rle"].update(size=[15, 16]), "size does not match"),
+        (lambda row: row["mask_rle"].update(counts="1"), "runs do not cover"),
+        (lambda row: row.update(bbox_xyxy=[1, 2, 9, 13]), "does not match mask_rle bounds"),
+    ],
+)
+def test_canonical_validation_rejects_invalid_mask_rle(tmp_path: Path, mutation, message: str) -> None:
+    dataset = _draft_destination(tmp_path)
+    tracks = dataset / "clips" / "synthetic-clip" / "tracks.jsonl"
+    rows = [json.loads(line) for line in tracks.read_text().splitlines()]
+    rows[0]["mask_rle"] = _rectangle_rle()
+    mutation(rows[0])
+    tracks.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    with pytest.raises(DatasetError, match=message):
+        validate_dataset(dataset, require_manifest=False)
 
 
 def test_source_recipe_rejects_non_model_labels(tmp_path: Path) -> None:
