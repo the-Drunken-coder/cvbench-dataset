@@ -1,9 +1,10 @@
 schema_version: cvbench.dataset/v1
 id: recovered-clean-videos-v1
-version: 0.1.0
-title: Recovered clean videos training proposals
-description: Five hash-pinned Pixabay and Pexels source videos with 5 FPS YOLOX-X model proposals. The labels are
-  non-exhaustive draft training data, not reviewed ground truth.
+version: 0.2.0
+title: Recovered clean videos dense segmentation tracks
+description: Five hash-pinned Pixabay and Pexels videos processed at native cadence
+  with YOLO26x-seg and TrackTrack appearance association. Dense model output is pending
+  human review and is not ground truth.
 state: draft
 data_role: training_only
 annotation_scope: sparse
@@ -11,9 +12,9 @@ evaluation_eligible: false
 ontology:
   classes:
   - id: person
-    description: YOLOX-X proposal for a visible person.
+    description: Model-generated mask and track for a visible person.
   - id: dog
-    description: YOLOX-X proposal for a visible dog.
+    description: Model-generated mask and track for a visible dog.
 clips:
 - id: pexels-18187166-dune
   path: clips/pexels-18187166-dune

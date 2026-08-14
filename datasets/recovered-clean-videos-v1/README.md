@@ -1,8 +1,10 @@
 # Recovered clean videos v1
 
-This source recipe describes five clean Pixabay/Pexels videos and 504
-confidence-bearing YOLOX-X proposals sampled at 5 FPS. It is public training
-material, not benchmark truth:
+This source recipe describes five clean Pixabay/Pexels videos and 3,411
+confidence-bearing instance masks across eight tracks. YOLO26x-seg processed
+every native video frame in class-isolated person and dog passes, with
+TrackTrack and a pinned YOLO26n appearance encoder providing cross-frame
+association. It is public training material, not benchmark truth:
 
 - `data_role: training_only`
 - `evaluation_eligible: false`
@@ -10,11 +12,12 @@ material, not benchmark truth:
 - every label origin is `model_generated`
 - every `review.jsonl` is intentionally empty
 
-Proposal IDs are frame-local detections, not trusted cross-frame identities.
-Missing proposals are unknown and must not be interpreted as verified
-background. The known visual audit exclusion for a repeated tree-root false
-positive is recorded in `artifacts/recovered-training-config.json` and bound to
-each model run by SHA-256, but that does not turn the remaining proposals into
+Track IDs are model-generated continuity candidates pending human review.
+Missing masks are unknown and must not be interpreted as verified background,
+even though inference visited every target-class/frame combination. Detector,
+ReID, tracker, and threshold settings are hash-bound through
+`artifacts/yolo26x-dense-tracking.json`; both weight files and the generator
+revision are pinned in provenance. None of that turns the output into
 human-reviewed labels.
 
 ## Obtain and hydrate the media
