@@ -99,7 +99,6 @@ def frame_rows(
     source: dict[str, Any],
     class_names: dict[int, str],
     run_id: str,
-    track_classes: dict[int, str],
 ) -> list[dict[str, Any]]:
     boxes = result.boxes
     masks = result.masks
@@ -118,9 +117,6 @@ def frame_rows(
         class_id = class_names.get(numeric_class_id)
         if class_id is None:
             raise ValueError(f"{clip_id} frame {frame_index}: unexpected class {numeric_class_id}")
-        previous_class = track_classes.setdefault(numeric_track_id, class_id)
-        if previous_class != class_id:
-            raise ValueError(f"{clip_id}: track {numeric_track_id} changed class")
         mask = masks.data[index].detach().cpu().numpy() > 0.5
         if mask.shape != (media["height"], media["width"]):
             import cv2
@@ -155,22 +151,21 @@ def frame_rows(
     return sorted(rows, key=lambda row: row["track_id"])
 
 
-def process_clip(
+def process_class(
     model: YOLO,
     *,
     dataset_root: Path,
     clip_id: str,
     video: Path,
-    output_root: Path,
     config: dict[str, Any],
     tracker_path: Path,
     device: str,
-) -> dict[str, Any]:
+    numeric_class_id: int,
+    class_id: str,
+) -> list[dict[str, Any]]:
     source = load_json(dataset_root / "clips" / clip_id / "source.json")
     run_id = f"yolo26x-seg-tracktrack-{clip_id}"
-    class_names = {int(key): value for key, value in config["inference"]["classes"].items()}
     inference = config["inference"]
-    track_classes: dict[int, str] = {}
     rows: list[dict[str, Any]] = []
     frame_count = 0
     results = model.track(
@@ -179,7 +174,7 @@ def process_clip(
         persist=False,
         tracker=str(tracker_path),
         device=device,
-        classes=sorted(class_names),
+        classes=[numeric_class_id],
         conf=inference["confidence_threshold"],
         iou=inference["iou_threshold"],
         imgsz=inference["image_size"],
@@ -196,25 +191,61 @@ def process_clip(
                 clip_id=clip_id,
                 frame_index=frame_index,
                 source=source,
-                class_names=class_names,
+                class_names={numeric_class_id: class_id},
                 run_id=run_id,
-                track_classes=track_classes,
             )
         )
         frame_count += 1
         if frame_count % 100 == 0:
-            print(f"{clip_id}: {frame_count}/{source['media']['frame_count']} frames", flush=True)
+            print(
+                f"{clip_id} {class_id}: {frame_count}/{source['media']['frame_count']} frames",
+                flush=True,
+            )
     if frame_count != source["media"]["frame_count"]:
         raise ValueError(
-            f"{clip_id}: processed {frame_count} frames, expected {source['media']['frame_count']}"
+            f"{clip_id} {class_id}: processed {frame_count} frames, "
+            f"expected {source['media']['frame_count']}"
         )
+    return rows
+
+
+def process_clip(
+    model: YOLO,
+    *,
+    dataset_root: Path,
+    clip_id: str,
+    video: Path,
+    output_root: Path,
+    config: dict[str, Any],
+    tracker_path: Path,
+    device: str,
+) -> dict[str, Any]:
+    source = load_json(dataset_root / "clips" / clip_id / "source.json")
+    class_names = {int(key): value for key, value in config["inference"]["classes"].items()}
+    rows = [
+        row
+        for numeric_class_id, class_id in class_names.items()
+        for row in process_class(
+            model,
+            dataset_root=dataset_root,
+            clip_id=clip_id,
+            video=video,
+            config=config,
+            tracker_path=tracker_path,
+            device=device,
+            numeric_class_id=numeric_class_id,
+            class_id=class_id,
+        )
+    ]
+    rows.sort(key=lambda row: (row["frame_index"], row["track_id"]))
     clip_output = output_root / clip_id
     clip_output.mkdir()
     tracks = b"".join(canonical_json(row) for row in rows)
     (clip_output / "tracks.jsonl").write_bytes(tracks)
     summary = {
         "clip_id": clip_id,
-        "frame_count": frame_count,
+        "frame_count": source["media"]["frame_count"],
+        "model_frames_processed": source["media"]["frame_count"] * len(class_names),
         "annotation_rows": len(rows),
         "track_count": len({row["track_id"] for row in rows}),
         "tracks_sha256": hashlib.sha256(tracks).hexdigest(),

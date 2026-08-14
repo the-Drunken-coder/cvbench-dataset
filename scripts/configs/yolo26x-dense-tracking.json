@@ -30,7 +30,8 @@
     "image_size": 1280,
     "maximum_detections": 100,
     "retina_masks": true,
-    "video_stride": 1
+    "video_stride": 1,
+    "class_isolated_passes": true
   },
   "tracker": {
     "tracker_type": "tracktrack",
