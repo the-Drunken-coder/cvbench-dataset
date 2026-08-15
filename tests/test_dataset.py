@@ -164,7 +164,7 @@ def _encode_coco_rle(runs: list[int]) -> str:
     return "".join(encoded)
 
 
-def _rectangle_rle() -> dict:
+def _rectangle_runs() -> list[int]:
     pixels = [0] * (16 * 16)
     for x in range(2, 9):
         for y in range(2, 13):
@@ -180,7 +180,11 @@ def _rectangle_rle() -> dict:
             current = pixel
             length = 1
     runs.append(length)
-    return {"size": [16, 16], "counts": _encode_coco_rle(runs)}
+    return runs
+
+
+def _rectangle_rle() -> dict:
+    return {"size": [16, 16], "counts": _encode_coco_rle(_rectangle_runs())}
 
 
 def test_init_creates_a_valid_empty_draft(tmp_path: Path) -> None:
@@ -955,6 +959,12 @@ def test_canonical_validation_accepts_compact_source_resolution_mask(tmp_path: P
             "no foreground pixels",
         ),
         (lambda row: row["mask_rle"].update(counts="PPP0"), "media-derived limit"),
+        (
+            lambda row: row["mask_rle"].update(
+                counts=_encode_coco_rle([*_rectangle_runs(), 0, 0])
+            ),
+            "not canonical",
+        ),
     ],
 )
 def test_canonical_validation_rejects_invalid_mask_rle(tmp_path: Path, mutation, message: str) -> None:

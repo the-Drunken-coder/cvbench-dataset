@@ -56,6 +56,22 @@ def _decode_coco_rle(counts: str, area: int, context: str) -> list[int]:
     return runs
 
 
+def _encode_coco_rle(runs: list[int]) -> str:
+    encoded: list[str] = []
+    for index, original in enumerate(runs):
+        value = original - runs[index - 2] if index > 2 else original
+        while True:
+            code = value & 0x1F
+            value >>= 5
+            more = value != (-1 if code & 0x10 else 0)
+            if more:
+                code |= 0x20
+            encoded.append(chr(code + 48))
+            if not more:
+                break
+    return "".join(encoded)
+
+
 def _mask_bbox(runs: list[int], height: int, context: str) -> list[int]:
     offset = 0
     bounds: list[int] | None = None
@@ -89,6 +105,8 @@ def _validate_mask(row: dict[str, Any], media: dict[str, Any], context: str) -> 
         raise DatasetError(f"{context}: mask_rle size does not match the declared media")
     area = media["height"] * media["width"]
     runs = _decode_coco_rle(mask["counts"], area, context)
+    if any(length == 0 for length in runs[1:]) or _encode_coco_rle(runs) != mask["counts"]:
+        raise DatasetError(f"{context}: mask_rle counts are not canonical")
     if sum(runs) != area:
         raise DatasetError(f"{context}: mask_rle runs do not cover the declared media")
     if row["bbox_xyxy"] != _mask_bbox(runs, media["height"], context):

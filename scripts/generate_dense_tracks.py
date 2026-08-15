@@ -59,7 +59,7 @@ def generator_revision() -> str:
     if len(head) != 40 or any(character not in "0123456789abcdef" for character in head):
         raise RuntimeError("generator repository HEAD is not a full Git commit")
     status = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=no"],
+        ["git", "status", "--porcelain", "--untracked-files=all"],
         cwd=REPOSITORY_ROOT,
         check=True,
         capture_output=True,
