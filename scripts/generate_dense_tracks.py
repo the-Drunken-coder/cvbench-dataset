@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -24,6 +25,7 @@ from cvbench_dataset import validate_source_recipe
 
 CONFIG_ARTIFACT = "artifacts/yolo26x-dense-tracking.json"
 DATASET_ID = "recovered-clean-videos-v1"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def sha256_file(path: Path) -> str:
@@ -43,6 +45,29 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def canonical_json(value: dict[str, Any]) -> bytes:
     return (json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n").encode()
+
+
+def generator_revision() -> str:
+    """Return the exact clean Git revision containing the running generator."""
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPOSITORY_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if len(head) != 40 or any(character not in "0123456789abcdef" for character in head):
+        raise RuntimeError("generator repository HEAD is not a full Git commit")
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=REPOSITORY_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    if status:
+        raise RuntimeError("generator repository has tracked changes; commit them before inference")
+    return head
 
 
 def source_timestamp_ns(frame_index: int, numerator: int, denominator: int) -> int:
@@ -281,8 +306,6 @@ def updated_source(
         str(config_argument),
         "--output-dir",
         "<new-ignored-output-directory>",
-        "--generator-revision",
-        generator_revision,
         "--device",
         device,
         "--apply",
@@ -321,9 +344,9 @@ def updated_source(
 def stage_dataset(
     dataset_root: Path,
     output_root: Path,
-    config_path: Path,
-    weights_path: Path,
-    reid_weights_path: Path,
+    config: dict[str, Any],
+    config_bytes: bytes,
+    weights_sha256: str,
     generator_revision: str,
     config_argument: Path,
     device: str,
@@ -332,10 +355,7 @@ def stage_dataset(
     stage = stage_parent / dataset_root.name
     try:
         shutil.copytree(dataset_root, stage)
-        config = load_json(config_path)
-        config_bytes = canonical_json(config)
         config_sha256 = hashlib.sha256(config_bytes).hexdigest()
-        weights_sha256, _ = verify_pinned_weights(config, weights_path, reid_weights_path)
 
         descriptor_path = stage / "dataset.yaml"
         descriptor = yaml.safe_load(descriptor_path.read_text())
@@ -436,7 +456,6 @@ def parse_args() -> argparse.Namespace:
         default=Path("scripts/configs/yolo26x-dense-tracking.json"),
     )
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--generator-revision", required=True)
     parser.add_argument("--device", default="mps")
     parser.add_argument("--apply", action="store_true")
     return parser.parse_args()
@@ -461,8 +480,10 @@ def main() -> None:
     report = validate_source_recipe(dataset_root)
     if report.id != DATASET_ID:
         raise ValueError(f"this generator only accepts {DATASET_ID}")
+    revision = generator_revision()
     sources = verified_sources(dataset_root, source_dir)
     config = load_json(config_path)
+    config_bytes = canonical_json(config)
     weights_sha256, reid_weights_sha256 = verify_pinned_weights(config, weights, reid_weights)
     output_root.mkdir(parents=True)
     tracker_path = tracker_yaml(config, output_root, reid_weights)
@@ -482,21 +503,22 @@ def main() -> None:
     ]
     manifest = {
         "schema_version": "cvbench.dense-tracking-run/v1",
-        "generator_revision": args.generator_revision,
+        "generator_revision": revision,
         "weights_sha256": weights_sha256,
         "reid_weights_sha256": reid_weights_sha256,
-        "config_sha256": hashlib.sha256(canonical_json(config)).hexdigest(),
+        "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
         "clips": summaries,
     }
     (output_root / "run.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     if args.apply:
+        verify_pinned_weights(config, weights, reid_weights)
         stage = stage_dataset(
             dataset_root,
             output_root,
-            config_path,
-            weights,
-            reid_weights,
-            args.generator_revision,
+            config,
+            config_bytes,
+            weights_sha256,
+            revision,
             args.config,
             args.device,
         )
