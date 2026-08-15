@@ -36,6 +36,7 @@ def require_locked_environment() -> None:
         or Path(virtual_environment).resolve() != prefix
         or prefix == REPOSITORY_ROOT
         or REPOSITORY_ROOT in prefix.parents
+        or sys.pycache_prefix != "/dev/null"
     ):
         raise RuntimeError(
             "run with `uv run --frozen --isolated --all-extras --no-editable python -I`"
@@ -519,6 +520,8 @@ def updated_source(
         "--no-editable",
         "python",
         "-I",
+        "-X",
+        "pycache_prefix=/dev/null",
         "scripts/generate_dense_tracks.py",
         "--dataset-root",
         f"datasets/{DATASET_ID}",
