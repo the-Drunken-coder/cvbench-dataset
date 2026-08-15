@@ -1913,7 +1913,7 @@ def test_dense_publication_commits_exchange_before_removing_old_tree(
     ]
 
 
-def test_dense_publication_rolls_back_interrupt_after_exchange(
+def test_dense_publication_preserves_recovery_intent_after_exchange_interrupt(
     dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dataset = tmp_path / "dataset"
@@ -1954,7 +1954,8 @@ def test_dense_publication_rolls_back_interrupt_after_exchange(
         dense_generator.apply_stage(dataset, stage, expected)
 
     assert blocked == {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
-    assert exchanges == [(dataset, stage), (dataset, stage)]
+    assert exchanges == [(dataset, stage)]
+    assert (tmp_path / "lock").read_bytes()
 
 
 def test_dense_publication_recovers_durable_unfinished_exchange(
@@ -1986,7 +1987,7 @@ def test_dense_publication_recovers_durable_unfinished_exchange(
         lock.seek(0)
         assert lock.read() == b""
 
-    assert (dataset / "state.txt").read_text() == "previous\n"
+    assert (dataset / "state.txt").read_text() == "next\n"
     assert not stage.exists()
 
 
@@ -2023,11 +2024,11 @@ def test_dense_publication_recovers_from_torn_phase_append(
         lock.seek(0)
         assert lock.read() == b""
 
-    assert (dataset / "state.txt").read_text() == "previous\n"
+    assert (dataset / "state.txt").read_text() == "next\n"
     assert not stage.exists()
 
 
-def test_dense_publication_durably_rolls_back_failed_validation(
+def test_dense_publication_preserves_failed_validation_for_recovery(
     dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dataset = tmp_path / "dataset"
@@ -2063,7 +2064,7 @@ def test_dense_publication_durably_rolls_back_failed_validation(
     monkeypatch.setattr(
         dense_generator.shutil,
         "rmtree",
-        lambda _: pytest.fail("the displaced tree must survive a rolled-back publication"),
+        lambda _: pytest.fail("a failed publication must preserve both trees"),
     )
 
     with pytest.raises(ValueError, match="invalid publication"):
@@ -2073,12 +2074,11 @@ def test_dense_publication_durably_rolls_back_failed_validation(
         ("exchange", (dataset, stage)),
         ("sync-exchange", (dataset, stage)),
         ("validate", dataset),
-        ("exchange", (dataset, stage)),
-        ("sync-exchange", (dataset, stage)),
     ]
+    assert (tmp_path / "lock").read_bytes()
 
 
-def test_dense_publication_reports_failed_rollback_paths(
+def test_dense_publication_reports_recovery_paths(
     dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dataset = tmp_path / "dataset"
@@ -2086,33 +2086,25 @@ def test_dense_publication_reports_failed_rollback_paths(
     dataset.mkdir()
     stage.mkdir(parents=True)
     expected = {"dataset.yaml": "file:hash"}
-    exchanges = 0
-
-    def exchange(*_: Path) -> None:
-        nonlocal exchanges
-        exchanges += 1
-        if exchanges == 2:
-            raise OSError("rollback exchange failed")
-
     monkeypatch.setattr(dense_generator, "publication_lock_path", lambda _: tmp_path / "lock")
     monkeypatch.setattr(dense_generator, "tree_hashes", lambda _: expected)
     monkeypatch.setattr(dense_generator, "sync_tree", lambda _: None)
     monkeypatch.setattr(dense_generator, "sync_directory", lambda _: None)
     monkeypatch.setattr(dense_generator, "sync_exchange_parents", lambda *_: None)
-    monkeypatch.setattr(dense_generator, "exchange_directories", exchange)
+    monkeypatch.setattr(dense_generator, "exchange_directories", lambda *_: None)
     monkeypatch.setattr(
         dense_generator,
         "validate_source_recipe",
         lambda _: (_ for _ in ()).throw(ValueError("invalid publication")),
     )
 
-    with pytest.raises(OSError, match="rollback exchange failed") as failure:
+    with pytest.raises(ValueError, match="invalid publication") as failure:
         dense_generator.apply_stage(dataset, stage, expected)
 
     note = "\n".join(failure.value.__notes__)
-    assert "invalid publication" in note
     assert str(dataset) in note
     assert str(stage) in note
+    assert str(tmp_path / "lock") in note
 
 
 def test_dense_publication_preserves_concurrent_update_instead_of_rollback(
@@ -2133,7 +2125,7 @@ def test_dense_publication_preserves_concurrent_update_instead_of_rollback(
     monkeypatch.setattr(dense_generator, "publication_lock_path", lambda _: tmp_path / "lock")
     monkeypatch.setattr(dense_generator, "validate_source_recipe", mutate_then_fail)
 
-    with pytest.raises(RuntimeError, match="preserving both trees and the recovery intent"):
+    with pytest.raises(ValueError, match="invalid publication"):
         dense_generator.apply_stage(dataset, stage, expected)
 
     assert (dataset / "state.txt").read_text() == "next\n"

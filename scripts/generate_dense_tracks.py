@@ -336,9 +336,10 @@ def recover_publication(lock: Any, dataset_root: Path) -> None:
         if root_sha256 != next_sha256 or stage_sha256 not in {None, previous_sha256}:
             raise RuntimeError("committed publication intent does not match the filesystem")
     elif root_sha256 == next_sha256 and stage_sha256 == previous_sha256:
-        exchange_directories(resolved_root, stage)
-        sync_exchange_parents(resolved_root, stage)
-        stage_sha256 = next_sha256
+        # The exact candidate bytes were validated and persisted before the atomic exchange. Once
+        # they own the canonical path, recovery completes publication instead of racing writers by
+        # swapping the directories a second time.
+        pass
     elif root_sha256 != previous_sha256 or stage_sha256 != next_sha256:
         raise RuntimeError("unfinished publication intent does not match the filesystem")
     if stage_sha256 is not None:
@@ -798,11 +799,8 @@ def apply_stage(
         write_publication_intent(lock, intent)
         blocked_signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
         previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked_signals)
-        exchanged = False
-        committed = False
         try:
             exchange_directories(dataset_root, stage)
-            exchanged = True
             sync_exchange_parents(dataset_root, stage)
             intent["phase"] = "exchanged"
             write_publication_intent(lock, intent)
@@ -811,30 +809,14 @@ def apply_stage(
             validate_source_recipe(dataset_root)
             intent["phase"] = "committed"
             write_publication_intent(lock, intent)
-            committed = True
-            write_publication_intent(lock, None)
             shutil.rmtree(stage)
             sync_directory(stage.parent)
-        except BaseException as publication_error:
-            if committed:
-                raise
-            if exchanged:
-                published_sha256 = inventory_sha256(tree_hashes(dataset_root))
-                if published_sha256 != intent["next_sha256"]:
-                    raise RuntimeError(
-                        "published dataset changed after exchange; preserving both trees and "
-                        f"the recovery intent at {lock_path}"
-                    ) from publication_error
-                try:
-                    exchange_directories(dataset_root, stage)
-                    sync_exchange_parents(dataset_root, stage)
-                except BaseException as rollback_error:
-                    rollback_error.add_note(
-                        f"rollback did not complete durably after {publication_error!r}; "
-                        f"inspect {dataset_root} and {stage} before retrying"
-                    )
-                    raise
             write_publication_intent(lock, None)
+        except BaseException as publication_error:
+            publication_error.add_note(
+                f"publication recovery is recorded at {lock_path}; inspect {dataset_root} "
+                f"and {stage} if automatic recovery cannot reconcile them"
+            )
             raise
         finally:
             restore_signal_mask(previous_mask)
