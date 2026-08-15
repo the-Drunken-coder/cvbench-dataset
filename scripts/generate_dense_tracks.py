@@ -31,6 +31,7 @@ from ultralytics import __version__ as ultralytics_version
 from cvbench_dataset import validate_source_recipe
 
 CONFIG_ARTIFACT = "artifacts/yolo26x-dense-tracking.json"
+CONFIG_SOURCE = "scripts/configs/yolo26x-dense-tracking.json"
 DATASET_ID = "recovered-clean-videos-v1"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -526,7 +527,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path("scripts/configs/yolo26x-dense-tracking.json"),
+        default=Path(CONFIG_SOURCE),
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="mps")
@@ -554,12 +555,17 @@ def main() -> None:
         raise RuntimeError(f"expected ultralytics 8.4.120, found {ultralytics_version}")
     revision = generator_revision()
     config = load_json(config_path)
-    inference_config = config.get("inference")
-    if not isinstance(inference_config, dict) or inference_config.get("class_isolated_passes") is not True:
-        raise ValueError("generator requires inference.class_isolated_passes to be true")
-    if inference_config.get("classes") != {"0": "person", "16": "dog"}:
-        raise ValueError("generator requires inference.classes to map 0 to person and 16 to dog")
     config_bytes = canonical_json(config)
+    supported_config = json.loads(
+        subprocess.run(
+            ["git", "show", f"{revision}:{CONFIG_SOURCE}"],
+            cwd=REPOSITORY_ROOT,
+            check=True,
+            capture_output=True,
+        ).stdout
+    )
+    if not isinstance(supported_config, dict) or config_bytes != canonical_json(supported_config):
+        raise ValueError("generator config must match the canonical config at repository HEAD")
     output_root.mkdir(parents=True)
     recipe_snapshot = output_root / "source-recipe"
     source_snapshot = output_root / "verified-sources"
