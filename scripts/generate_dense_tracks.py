@@ -131,8 +131,6 @@ def site_packages_fingerprint() -> str:
             continue
         if not path.is_file():
             raise RuntimeError(f"locked environment contains an unsupported entry: {relative}")
-        if "__pycache__" in relative.parts or path.suffix in {".pyc", ".pyo"}:
-            continue
         top_level = relative.parts[0]
         if top_level == "cvbench_dataset" or (
             top_level.startswith("cvbench_dataset-") and top_level.endswith(".dist-info")
@@ -189,7 +187,7 @@ def verify_project_install(revision: str) -> None:
     actual = {
         path.relative_to(package_root).as_posix()
         for path in package_root.rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
+        if path.is_file()
     }
     if actual != expected:
         raise RuntimeError("installed cvbench-dataset file inventory does not match repository HEAD")
@@ -260,20 +258,25 @@ def inventory_sha256(hashes: dict[str, str]) -> str:
 
 
 def write_publication_intent(lock: Any, intent: dict[str, Any] | None) -> None:
-    contents = b"" if intent is None else canonical_json(intent)
-    lock.seek(0)
-    lock.truncate()
-    lock.write(contents)
+    if intent is None:
+        lock.seek(0)
+        lock.truncate()
+    else:
+        # Keep the previous durable phase until the new record is complete. Recovery ignores a
+        # torn final line, so a crash can never erase the only usable publication intent.
+        lock.seek(0, os.SEEK_END)
+        lock.write(canonical_json(intent))
     lock.flush()
     os.fsync(lock.fileno())
 
 
 def recover_publication(lock: Any, dataset_root: Path) -> None:
     lock.seek(0)
-    contents = lock.read()
-    if not contents:
+    records = [line for line in lock.read().splitlines(keepends=True) if line.endswith(b"\n")]
+    if not records:
+        write_publication_intent(lock, None)
         return
-    intent = json.loads(contents)
+    intent = json.loads(records[-1])
     if not isinstance(intent, dict):
         raise RuntimeError("publication intent is not a JSON object")
     expected_keys = {
@@ -310,10 +313,10 @@ def recover_publication(lock: Any, dataset_root: Path) -> None:
         stage_sha256 = next_sha256
     elif root_sha256 != previous_sha256 or stage_sha256 != next_sha256:
         raise RuntimeError("unfinished publication intent does not match the filesystem")
-    write_publication_intent(lock, None)
     if stage_sha256 is not None:
         shutil.rmtree(stage)
         sync_directory(stage.parent)
+    write_publication_intent(lock, None)
 
 
 def restore_signal_mask(previous_mask: set[signal.Signals]) -> None:
@@ -787,6 +790,12 @@ def apply_stage(
             if committed:
                 raise
             if exchanged:
+                published_sha256 = inventory_sha256(tree_hashes(dataset_root))
+                if published_sha256 != intent["next_sha256"]:
+                    raise RuntimeError(
+                        "published dataset changed after exchange; preserving both trees and "
+                        f"the recovery intent at {lock_path}"
+                    ) from publication_error
                 try:
                     exchange_directories(dataset_root, stage)
                     sync_exchange_parents(dataset_root, stage)

@@ -1797,6 +1797,24 @@ def test_dense_generator_fingerprint_binds_installed_bytes(
     assert dense_generator.site_packages_fingerprint() != original
 
 
+def test_dense_generator_fingerprint_binds_sourceless_bytecode(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    site_packages = tmp_path / "lib" / "python3.12" / "site-packages"
+    site_packages.mkdir(parents=True)
+    bytecode = site_packages / "sitecustomize.pyc"
+    bytecode.write_bytes(b"first")
+    monkeypatch.setattr(dense_generator.sys, "prefix", str(tmp_path))
+    monkeypatch.setattr(
+        dense_generator.sysconfig, "get_paths", lambda: {"purelib": str(site_packages)}
+    )
+
+    original = dense_generator.site_packages_fingerprint()
+    bytecode.write_bytes(b"second")
+
+    assert dense_generator.site_packages_fingerprint() != original
+
+
 def test_dense_generator_fingerprint_binds_python_runtime_bytes(
     dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1975,6 +1993,43 @@ def test_dense_publication_recovers_durable_unfinished_exchange(
     assert not stage.exists()
 
 
+def test_dense_publication_recovers_from_torn_phase_append(
+    dense_generator: ModuleType, tmp_path: Path
+) -> None:
+    dataset = tmp_path / "dataset"
+    stage = tmp_path / "stage-parent" / "dataset"
+    dataset.mkdir()
+    stage.mkdir(parents=True)
+    (dataset / "state.txt").write_text("previous\n")
+    (stage / "state.txt").write_text("next\n")
+    intent = {
+        "schema_version": "cvbench.publication-intent/v1",
+        "phase": "prepared",
+        "dataset_root": str(dataset.resolve()),
+        "stage": str(stage.resolve()),
+        "previous_sha256": dense_generator.inventory_sha256(
+            dense_generator.tree_hashes(dataset)
+        ),
+        "next_sha256": dense_generator.inventory_sha256(dense_generator.tree_hashes(stage)),
+    }
+    lock_path = tmp_path / "publication.lock"
+
+    with lock_path.open("w+b") as lock:
+        dense_generator.write_publication_intent(lock, intent)
+        dense_generator.exchange_directories(dataset, stage)
+        dense_generator.sync_exchange_parents(dataset, stage)
+        lock.seek(0, os.SEEK_END)
+        lock.write(b'{"phase":"exchanged"')
+        lock.flush()
+        os.fsync(lock.fileno())
+        dense_generator.recover_publication(lock, dataset)
+        lock.seek(0)
+        assert lock.read() == b""
+
+    assert (dataset / "state.txt").read_text() == "previous\n"
+    assert not stage.exists()
+
+
 def test_dense_publication_durably_rolls_back_failed_validation(
     dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2061,3 +2116,30 @@ def test_dense_publication_reports_failed_rollback_paths(
     assert "invalid publication" in note
     assert str(dataset) in note
     assert str(stage) in note
+
+
+def test_dense_publication_preserves_concurrent_update_instead_of_rollback(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "dataset"
+    stage = tmp_path / "stage-parent" / "dataset"
+    dataset.mkdir()
+    stage.mkdir(parents=True)
+    (dataset / "state.txt").write_text("previous\n")
+    (stage / "state.txt").write_text("next\n")
+    expected = dense_generator.tree_hashes(dataset)
+
+    def mutate_then_fail(path: Path) -> None:
+        (path / "concurrent.txt").write_text("preserve me\n")
+        raise ValueError("invalid publication")
+
+    monkeypatch.setattr(dense_generator, "publication_lock_path", lambda _: tmp_path / "lock")
+    monkeypatch.setattr(dense_generator, "validate_source_recipe", mutate_then_fail)
+
+    with pytest.raises(RuntimeError, match="preserving both trees and the recovery intent"):
+        dense_generator.apply_stage(dataset, stage, expected)
+
+    assert (dataset / "state.txt").read_text() == "next\n"
+    assert (dataset / "concurrent.txt").read_text() == "preserve me\n"
+    assert (stage / "state.txt").read_text() == "previous\n"
+    assert (tmp_path / "lock").read_bytes()
