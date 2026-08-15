@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import hashlib
+import importlib.machinery
 import json
 import os
 import shutil
@@ -58,6 +59,35 @@ def generator_revision() -> str:
     ).stdout.strip()
     if len(head) != 40 or any(character not in "0123456789abcdef" for character in head):
         raise RuntimeError("generator repository HEAD is not a full Git commit")
+    tracked = {
+        path
+        for path in subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=REPOSITORY_ROOT,
+            check=True,
+            capture_output=True,
+        ).stdout.decode().split("\0")
+        if path
+    }
+    script_root = Path(__file__).resolve().parent
+    import_suffixes = importlib.machinery.all_suffixes()
+    import_candidates: list[Path] = []
+    for child in script_root.iterdir():
+        if child.is_file() and any(child.name.endswith(suffix) for suffix in import_suffixes):
+            import_candidates.append(child)
+        elif child.is_dir():
+            import_candidates.extend(
+                package_init
+                for suffix in import_suffixes
+                if (package_init := child / f"__init__{suffix}").is_file()
+            )
+    untracked_imports = sorted(
+        path.relative_to(REPOSITORY_ROOT).as_posix()
+        for path in import_candidates
+        if path.relative_to(REPOSITORY_ROOT).as_posix() not in tracked
+    )
+    if untracked_imports:
+        raise RuntimeError(f"generator import path contains untracked modules: {untracked_imports}")
     status = subprocess.run(
         ["git", "status", "--porcelain", "--untracked-files=all"],
         cwd=REPOSITORY_ROOT,
