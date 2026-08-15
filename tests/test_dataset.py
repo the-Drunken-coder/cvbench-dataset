@@ -1742,7 +1742,7 @@ def test_dense_generator_rejects_non_locked_isolated_environment() -> None:
     )
 
     assert result.returncode != 0
-    assert "uv run --frozen --isolated --all-extras --no-editable python -I" in result.stderr
+    assert "uv run --frozen --isolated --all-extras --no-editable python -I -S" in result.stderr
 
 
 def test_dense_generator_uses_owned_lock_and_disables_git_replacements(
@@ -1786,10 +1786,8 @@ def test_dense_generator_fingerprint_binds_installed_bytes(
     package.mkdir(parents=True)
     source = package / "__init__.py"
     source.write_text("VALUE = 1\n")
-    monkeypatch.setattr(dense_generator.sys, "prefix", str(tmp_path))
-    monkeypatch.setattr(
-        dense_generator.sysconfig, "get_paths", lambda: {"purelib": str(site_packages)}
-    )
+    monkeypatch.setattr(dense_generator, "locked_environment_root", lambda: tmp_path)
+    monkeypatch.setattr(dense_generator, "locked_site_packages", lambda: site_packages)
 
     original = dense_generator.site_packages_fingerprint()
     source.write_text("VALUE = 2\n")
@@ -1804,10 +1802,8 @@ def test_dense_generator_fingerprint_binds_sourceless_bytecode(
     site_packages.mkdir(parents=True)
     bytecode = site_packages / "sitecustomize.pyc"
     bytecode.write_bytes(b"first")
-    monkeypatch.setattr(dense_generator.sys, "prefix", str(tmp_path))
-    monkeypatch.setattr(
-        dense_generator.sysconfig, "get_paths", lambda: {"purelib": str(site_packages)}
-    )
+    monkeypatch.setattr(dense_generator, "locked_environment_root", lambda: tmp_path)
+    monkeypatch.setattr(dense_generator, "locked_site_packages", lambda: site_packages)
 
     original = dense_generator.site_packages_fingerprint()
     bytecode.write_bytes(b"second")
@@ -1860,6 +1856,7 @@ def test_dense_generator_replay_uses_config_from_recorded_revision(
     command = updated["model_runs"][0]["command"]
 
     assert command[command.index("--config") + 1] == dense_generator.CONFIG_SOURCE
+    assert command[command.index("python") + 1 : command.index("-X")] == ["-I", "-S"]
 
 
 def test_dense_publication_commits_exchange_before_removing_old_tree(

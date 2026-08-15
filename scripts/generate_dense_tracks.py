@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import sys
 
-# Isolated mode ignores PYTHONPATH, user-site packages, and the script directory. Refuse to load
-# any shadowable module until the interpreter has established that boundary.
-if __name__ == "__main__" and not sys.flags.isolated:
-    raise RuntimeError("run the dense-track generator with `python -I`")
+# Isolated mode ignores PYTHONPATH, user-site packages, and the script directory. No-site mode
+# also prevents sitecustomize and .pth hooks from running before the environment is verified.
+if __name__ == "__main__" and (not sys.flags.isolated or not sys.flags.no_site):
+    raise RuntimeError(
+        "run with `uv run --frozen --isolated --all-extras --no-editable python -I -S`"
+    )
 
 import argparse
 import ctypes
@@ -28,33 +30,37 @@ from typing import Any
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
-def require_locked_environment() -> None:
-    prefix = Path(sys.prefix).resolve()
+def locked_environment_root() -> Path:
     virtual_environment = os.environ.get("VIRTUAL_ENV")
+    if virtual_environment is None:
+        raise RuntimeError("VIRTUAL_ENV is required")
+    return Path(virtual_environment).resolve()
+
+
+def locked_site_packages() -> Path:
+    environment_root = locked_environment_root()
+    return Path(
+        sysconfig.get_path(
+            "purelib",
+            scheme="venv",
+            vars={"base": str(environment_root), "platbase": str(environment_root)},
+        )
+    ).resolve()
+
+
+def require_locked_environment() -> None:
+    prefix = locked_environment_root()
     if (
         os.environ.get("UV_RUN_RECURSION_DEPTH") != "1"
-        or virtual_environment is None
-        or Path(virtual_environment).resolve() != prefix
         or prefix == REPOSITORY_ROOT
         or REPOSITORY_ROOT in prefix.parents
         or sys.pycache_prefix != "/dev/null"
+        or not sys.flags.no_site
     ):
         raise RuntimeError(
-            "run with `uv run --frozen --isolated --all-extras --no-editable python -I`"
+            "run with `uv run --frozen --isolated --all-extras --no-editable python -I -S`"
         )
 
-
-if __name__ == "__main__":
-    require_locked_environment()
-
-# These imports are deliberately gated behind the locked-environment check above.
-import numpy as np  # noqa: E402
-import yaml  # noqa: E402
-from pycocotools import mask as mask_utils  # noqa: E402
-from ultralytics import YOLO  # noqa: E402
-from ultralytics import __version__ as ultralytics_version  # noqa: E402
-
-from cvbench_dataset import validate_source_recipe  # noqa: E402
 
 CONFIG_ARTIFACT = "artifacts/yolo26x-dense-tracking.json"
 CONFIG_SOURCE = "scripts/configs/yolo26x-dense-tracking.json"
@@ -62,14 +68,9 @@ DATASET_ID = "recovered-clean-videos-v1"
 
 
 def require_locked_project_install() -> None:
-    package_file = Path(validate_source_recipe.__code__.co_filename).resolve()
-    prefix = Path(sys.prefix).resolve()
-    if prefix not in package_file.parents or REPOSITORY_ROOT in package_file.parents:
+    package_root = locked_site_packages() / "cvbench_dataset"
+    if not package_root.is_dir():
         raise RuntimeError("cvbench-dataset must be installed non-editably in the isolated environment")
-
-
-if __name__ == "__main__":
-    require_locked_project_install()
 
 
 def sha256_file(path: Path) -> str:
@@ -118,8 +119,8 @@ def git_environment() -> dict[str, str]:
 
 
 def site_packages_fingerprint() -> str:
-    site_packages = Path(sysconfig.get_paths()["purelib"]).resolve()
-    prefix = Path(sys.prefix).resolve()
+    site_packages = locked_site_packages()
+    prefix = locked_environment_root()
     if prefix not in site_packages.parents:
         raise RuntimeError("site-packages is outside the active environment")
     digest = hashlib.sha256()
@@ -171,8 +172,8 @@ def python_runtime_fingerprint() -> str:
 
 
 def verify_project_install(revision: str) -> None:
-    package_root = Path(validate_source_recipe.__code__.co_filename).resolve().parent
-    prefix = Path(sys.prefix).resolve()
+    package_root = locked_site_packages() / "cvbench_dataset"
+    prefix = locked_environment_root()
     if prefix not in package_root.parents or REPOSITORY_ROOT in package_root.parents:
         raise RuntimeError("cvbench-dataset must be installed non-editably in the isolated environment")
     source_prefix = "src/cvbench_dataset/"
@@ -215,6 +216,33 @@ def verify_locked_artifacts(config: dict[str, Any], revision: str) -> None:
     if actual != expected:
         raise RuntimeError(f"installed environment does not match the canonical lock: {actual}")
     verify_project_install(revision)
+
+
+def activate_locked_site_packages() -> None:
+    """Expose verified packages without executing sitecustomize or .pth startup hooks."""
+    site_packages = locked_site_packages()
+    if not site_packages.is_dir():
+        raise RuntimeError("locked environment site-packages directory is missing")
+    sys.path.append(str(site_packages))
+
+
+def load_dependencies() -> None:
+    global YOLO, mask_utils, np, ultralytics_version, validate_source_recipe, yaml
+
+    import numpy as np_module
+    import yaml as yaml_module
+    from pycocotools import mask as mask_utils_module
+    from ultralytics import YOLO as yolo_class
+    from ultralytics import __version__ as version
+
+    from cvbench_dataset import validate_source_recipe as validate_source_recipe_function
+
+    np = np_module
+    yaml = yaml_module
+    mask_utils = mask_utils_module
+    YOLO = yolo_class
+    ultralytics_version = version
+    validate_source_recipe = validate_source_recipe_function
 
 
 def sync_directory(path: Path) -> None:
@@ -632,6 +660,7 @@ def updated_source(
         "--no-editable",
         "python",
         "-I",
+        "-S",
         "-X",
         "pycache_prefix=/dev/null",
         "scripts/generate_dense_tracks.py",
@@ -863,8 +892,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    if not sys.flags.isolated:
-        raise RuntimeError("run the dense-track generator with `python -I`")
+    if not sys.flags.isolated or not sys.flags.no_site:
+        raise RuntimeError("run the dense-track generator with `python -I -S`")
     require_locked_environment()
     require_locked_project_install()
     args = parse_args()
@@ -966,4 +995,26 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    require_locked_environment()
+    bootstrap_revision = generator_revision()
+    bootstrap_config = load_json(REPOSITORY_ROOT / CONFIG_SOURCE)
+    committed_config = json.loads(
+        subprocess.run(
+            git_command("show", f"{bootstrap_revision}:{CONFIG_SOURCE}"),
+            cwd=REPOSITORY_ROOT,
+            env=git_environment(),
+            check=True,
+            capture_output=True,
+        ).stdout
+    )
+    if (
+        not isinstance(committed_config, dict)
+        or canonical_json(bootstrap_config) != canonical_json(committed_config)
+    ):
+        raise RuntimeError("canonical generator config does not match repository HEAD")
+    verify_locked_artifacts(bootstrap_config, bootstrap_revision)
+    activate_locked_site_packages()
+    load_dependencies()
     main()
+else:
+    load_dependencies()
