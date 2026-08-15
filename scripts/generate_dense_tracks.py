@@ -65,6 +65,42 @@ def publication_lock_path(dataset_root: Path) -> Path:
     return Path(tempfile.gettempdir()) / f"cvbench-dataset-{key}.lock"
 
 
+def sync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def sync_tree(root: Path) -> None:
+    """Persist every staged file, then the directory entries that name them."""
+    directories = [root]
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"staged dataset cannot contain symlinks: {path}")
+        if path.is_dir():
+            directories.append(path)
+            continue
+        if not path.is_file():
+            raise ValueError(f"staged dataset contains an unsupported entry: {path}")
+        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+        descriptor = os.open(path, flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+        sync_directory(directory)
+
+
+def sync_exchange_parents(left: Path, right: Path) -> None:
+    for parent in {left.parent, right.parent}:
+        sync_directory(parent)
+
+
 def load_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text())
     if not isinstance(value, dict):
@@ -473,15 +509,20 @@ def apply_stage(
         fcntl.flock(lock, fcntl.LOCK_EX)
         if tree_hashes(dataset_root) != expected_previous_hashes:
             raise RuntimeError("dataset changed during inference; refusing to overwrite it")
+        sync_tree(stage)
+        sync_directory(stage.parent)
         exchange_directories(dataset_root, stage)
         try:
+            sync_exchange_parents(dataset_root, stage)
             if tree_hashes(stage) != expected_previous_hashes:
                 raise RuntimeError("dataset changed during inference; refusing to overwrite it")
             validate_source_recipe(dataset_root)
         except BaseException:
             exchange_directories(dataset_root, stage)
+            sync_exchange_parents(dataset_root, stage)
             raise
         shutil.rmtree(stage)
+        sync_directory(stage.parent)
 
 
 def exchange_directories(left: Path, right: Path) -> None:

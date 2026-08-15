@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
+import stat
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 import yaml
@@ -28,6 +32,21 @@ from cvbench_dataset.cli import main
 
 ROOT = Path(__file__).parents[1]
 SAMPLE = ROOT / "examples" / "minimal-certified"
+
+
+@pytest.fixture(scope="module")
+def dense_generator() -> ModuleType:
+    pytest.importorskip("ultralytics")
+    script = ROOT / "scripts" / "generate_dense_tracks.py"
+    spec = importlib.util.spec_from_file_location("cvbench_dense_generator", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    original_path = sys.path.copy()
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = original_path
+    return module
 
 
 def _copy_sample(tmp_path: Path) -> Path:
@@ -1664,3 +1683,117 @@ def test_studio_contribution_cannot_inject_review_approvals(tmp_path: Path) -> N
     with pytest.raises(DatasetError, match="empty draft review"):
         import_contribution(dataset, contribution)
     assert not (dataset / "clips" / "imported-clip").exists()
+
+
+def test_dense_generator_syncs_staged_files_and_directories(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "stage"
+    nested = root / "clips"
+    nested.mkdir(parents=True)
+    (nested / "tracks.jsonl").write_text("{}\n")
+    synced_modes: list[int] = []
+
+    monkeypatch.setattr(
+        dense_generator.os,
+        "fsync",
+        lambda descriptor: synced_modes.append(os.fstat(descriptor).st_mode),
+    )
+    dense_generator.sync_tree(root)
+
+    assert sum(stat.S_ISREG(mode) for mode in synced_modes) == 1
+    assert sum(stat.S_ISDIR(mode) for mode in synced_modes) == 2
+
+
+def test_dense_publication_commits_exchange_before_removing_old_tree(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "dataset"
+    stage_parent = tmp_path / "stage-parent"
+    stage = stage_parent / "dataset"
+    dataset.mkdir()
+    stage.mkdir(parents=True)
+    expected = {"dataset.yaml": "file:hash"}
+    events: list[tuple[str, Path | None]] = []
+
+    monkeypatch.setattr(dense_generator, "publication_lock_path", lambda _: tmp_path / "lock")
+    monkeypatch.setattr(dense_generator, "tree_hashes", lambda _: expected)
+    monkeypatch.setattr(
+        dense_generator, "sync_tree", lambda path: events.append(("sync-tree", path))
+    )
+    monkeypatch.setattr(
+        dense_generator, "sync_directory", lambda path: events.append(("sync-directory", path))
+    )
+    monkeypatch.setattr(
+        dense_generator,
+        "sync_exchange_parents",
+        lambda *_: events.append(("sync-exchange", None)),
+    )
+    monkeypatch.setattr(
+        dense_generator,
+        "exchange_directories",
+        lambda *_: events.append(("exchange", None)),
+    )
+    monkeypatch.setattr(
+        dense_generator,
+        "validate_source_recipe",
+        lambda _: events.append(("validate", dataset)),
+    )
+    monkeypatch.setattr(
+        dense_generator.shutil,
+        "rmtree",
+        lambda path: events.append(("remove-old", path)),
+    )
+
+    dense_generator.apply_stage(dataset, stage, expected)
+
+    assert events == [
+        ("sync-tree", stage),
+        ("sync-directory", stage_parent),
+        ("exchange", None),
+        ("sync-exchange", None),
+        ("validate", dataset),
+        ("remove-old", stage),
+        ("sync-directory", stage_parent),
+    ]
+
+
+def test_dense_publication_durably_rolls_back_failed_validation(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "dataset"
+    stage = tmp_path / "stage-parent" / "dataset"
+    dataset.mkdir()
+    stage.mkdir(parents=True)
+    expected = {"dataset.yaml": "file:hash"}
+    events: list[str] = []
+
+    monkeypatch.setattr(dense_generator, "publication_lock_path", lambda _: tmp_path / "lock")
+    monkeypatch.setattr(dense_generator, "tree_hashes", lambda _: expected)
+    monkeypatch.setattr(dense_generator, "sync_tree", lambda _: None)
+    monkeypatch.setattr(dense_generator, "sync_directory", lambda _: None)
+    monkeypatch.setattr(
+        dense_generator,
+        "sync_exchange_parents",
+        lambda *_: events.append("sync-exchange"),
+    )
+    monkeypatch.setattr(
+        dense_generator,
+        "exchange_directories",
+        lambda *_: events.append("exchange"),
+    )
+    monkeypatch.setattr(
+        dense_generator,
+        "validate_source_recipe",
+        lambda _: (_ for _ in ()).throw(ValueError("invalid publication")),
+    )
+    monkeypatch.setattr(
+        dense_generator.shutil,
+        "rmtree",
+        lambda _: pytest.fail("the displaced tree must survive a rolled-back publication"),
+    )
+
+    with pytest.raises(ValueError, match="invalid publication"):
+        dense_generator.apply_stage(dataset, stage, expected)
+
+    assert events == ["exchange", "sync-exchange", "exchange", "sync-exchange"]
