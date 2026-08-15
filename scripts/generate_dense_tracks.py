@@ -22,18 +22,50 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import yaml
-from pycocotools import mask as mask_utils
-from ultralytics import YOLO
-from ultralytics import __version__ as ultralytics_version
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
-from cvbench_dataset import validate_source_recipe
+
+def require_locked_environment() -> None:
+    prefix = Path(sys.prefix).resolve()
+    virtual_environment = os.environ.get("VIRTUAL_ENV")
+    if (
+        os.environ.get("UV_RUN_RECURSION_DEPTH") != "1"
+        or virtual_environment is None
+        or Path(virtual_environment).resolve() != prefix
+        or prefix == REPOSITORY_ROOT
+        or REPOSITORY_ROOT in prefix.parents
+    ):
+        raise RuntimeError(
+            "run with `uv run --frozen --isolated --all-extras --no-editable python -I`"
+        )
+
+
+if __name__ == "__main__":
+    require_locked_environment()
+
+# These imports are deliberately gated behind the locked-environment check above.
+import numpy as np  # noqa: E402
+import yaml  # noqa: E402
+from pycocotools import mask as mask_utils  # noqa: E402
+from ultralytics import YOLO  # noqa: E402
+from ultralytics import __version__ as ultralytics_version  # noqa: E402
+
+from cvbench_dataset import validate_source_recipe  # noqa: E402
 
 CONFIG_ARTIFACT = "artifacts/yolo26x-dense-tracking.json"
 CONFIG_SOURCE = "scripts/configs/yolo26x-dense-tracking.json"
 DATASET_ID = "recovered-clean-videos-v1"
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
+def require_locked_project_install() -> None:
+    package_file = Path(validate_source_recipe.__code__.co_filename).resolve()
+    prefix = Path(sys.prefix).resolve()
+    if prefix not in package_file.parents or REPOSITORY_ROOT in package_file.parents:
+        raise RuntimeError("cvbench-dataset must be installed non-editably in the isolated environment")
+
+
+if __name__ == "__main__":
+    require_locked_project_install()
 
 
 def sha256_file(path: Path) -> str:
@@ -393,6 +425,12 @@ def updated_source(
 ) -> dict[str, Any]:
     run_id = f"yolo26x-seg-tracktrack-{clip_id}"
     command = [
+        "uv",
+        "run",
+        "--frozen",
+        "--isolated",
+        "--all-extras",
+        "--no-editable",
         "python",
         "-I",
         "scripts/generate_dense_tracks.py",
@@ -591,6 +629,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     if not sys.flags.isolated:
         raise RuntimeError("run the dense-track generator with `python -I`")
+    require_locked_environment()
+    require_locked_project_install()
     args = parse_args()
     dataset_root = args.dataset_root.resolve()
     source_dir = args.source_dir.resolve()

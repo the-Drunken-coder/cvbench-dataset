@@ -1729,6 +1729,21 @@ def test_dense_generator_rejects_pythonpath_before_importing_modules(tmp_path: P
     assert not marker.exists()
 
 
+def test_dense_generator_rejects_non_locked_isolated_environment() -> None:
+    environment = os.environ.copy()
+    environment.pop("UV_RUN_RECURSION_DEPTH", None)
+    result = subprocess.run(
+        [sys.executable, "-I", str(ROOT / "scripts" / "generate_dense_tracks.py"), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "uv run --frozen --isolated --all-extras --no-editable python -I" in result.stderr
+
+
 def test_dense_generator_uses_owned_lock_and_disables_git_replacements(
     dense_generator: ModuleType, tmp_path: Path
 ) -> None:
