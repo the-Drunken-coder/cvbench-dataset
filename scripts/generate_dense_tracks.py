@@ -75,6 +75,15 @@ def generator_revision() -> str:
     ).stdout.strip()
     if len(head) != 40 or any(character not in "0123456789abcdef" for character in head):
         raise RuntimeError("generator repository HEAD is not a full Git commit")
+    top_level = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=REPOSITORY_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if Path(top_level).resolve() != REPOSITORY_ROOT:
+        raise RuntimeError("generator repository root is not the Git top level")
     status = subprocess.run(
         ["git", "status", "--porcelain", "--untracked-files=all"],
         cwd=REPOSITORY_ROOT,
