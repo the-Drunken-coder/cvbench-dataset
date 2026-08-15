@@ -500,6 +500,8 @@ def main() -> None:
     reid_weights = args.reid_weights.resolve()
     config_path = args.config.resolve()
     output_root = args.output_dir.resolve()
+    if output_root == dataset_root or dataset_root in output_root.parents:
+        raise ValueError("output directory must be outside dataset root")
     if output_root.exists():
         raise FileExistsError(f"output already exists: {output_root}")
     if not weights.is_file():

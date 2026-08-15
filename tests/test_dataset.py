@@ -13,6 +13,7 @@ import yaml
 
 import cvbench_dataset.manifest as manifest_module
 import cvbench_dataset.source_recipe as source_recipe_module
+import cvbench_dataset.validator as validator_module
 from cvbench_dataset import (
     DatasetError,
     build_release,
@@ -942,6 +943,22 @@ def test_canonical_validation_accepts_compact_source_resolution_mask(tmp_path: P
     rows[0]["mask_rle"] = _rectangle_rle()
     tracks.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
     assert validate_dataset(dataset, require_manifest=False).annotation_rows == 2
+
+
+def test_mask_validation_rejects_unsupported_dimensions_before_decoding() -> None:
+    width = validator_module.MAX_MASK_DIMENSION + 1
+    row = {
+        "bbox_xyxy": [0, 0, 1, 1],
+        "mask_rle": {"size": [1, width], "counts": "P" * 20_001 + "0"},
+    }
+    with pytest.raises(DatasetError, match="dimensions exceed the supported limit"):
+        validator_module._validate_mask(row, {"height": 1, "width": width}, "test mask")
+
+
+def test_rle_decoder_rejects_implementation_length_limit() -> None:
+    counts = "0" * (validator_module.MAX_MASK_RLE_CHARACTERS + 1)
+    with pytest.raises(DatasetError, match="counts exceed the implementation limit"):
+        validator_module._decode_coco_rle(counts, 256, "test mask")
 
 
 @pytest.mark.parametrize(

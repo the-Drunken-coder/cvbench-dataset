@@ -17,11 +17,17 @@ from .schema import SCHEMA_NAMES, schema_bytes, validate_schema
 CLIP_FILENAMES = {"review.jsonl", "source.json", "tracks.jsonl", "video.mp4"}
 TOP_LEVEL_NAMES = {"artifacts", "clips", "dataset.yaml", "licenses", "release-manifest.json", "schemas"}
 MODEL_ORIGINS = {"model_assisted", "model_generated"}
+MAX_MASK_DIMENSION = 32_768
+MAX_MASK_PIXELS = 268_435_456
+MAX_MASK_RLE_CHARACTERS = 1_000_000
+MAX_MASK_RLE_RUN_CHUNKS = 8
 
 
 def _decode_coco_rle(counts: str, area: int, context: str) -> list[int]:
     """Decode the compact COCO RLE string without requiring annotation dependencies."""
-    max_chunks = max(1, (area.bit_length() + 5) // 5)
+    if len(counts) > MAX_MASK_RLE_CHARACTERS:
+        raise DatasetError(f"{context}: mask_rle counts exceed the implementation limit")
+    max_chunks = min(MAX_MASK_RLE_RUN_CHUNKS, max(1, (area.bit_length() + 5) // 5))
     if len(counts) > (area + 1) * max_chunks:
         raise DatasetError(f"{context}: mask_rle counts exceed the media-derived limit")
     runs: list[int] = []
@@ -103,7 +109,11 @@ def _validate_mask(row: dict[str, Any], media: dict[str, Any], context: str) -> 
     expected_size = [media["height"], media["width"]]
     if mask["size"] != expected_size:
         raise DatasetError(f"{context}: mask_rle size does not match the declared media")
+    if media["width"] > MAX_MASK_DIMENSION or media["height"] > MAX_MASK_DIMENSION:
+        raise DatasetError(f"{context}: mask_rle media dimensions exceed the supported limit")
     area = media["height"] * media["width"]
+    if area > MAX_MASK_PIXELS:
+        raise DatasetError(f"{context}: mask_rle media area exceeds the supported limit")
     runs = _decode_coco_rle(mask["counts"], area, context)
     if any(length == 0 for length in runs[1:]) or _encode_coco_rle(runs) != mask["counts"]:
         raise DatasetError(f"{context}: mask_rle counts are not canonical")
