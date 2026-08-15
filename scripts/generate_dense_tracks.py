@@ -119,13 +119,10 @@ def frame_rows(
             raise ValueError(f"{clip_id} frame {frame_index}: unexpected class {numeric_class_id}")
         mask = masks.data[index].detach().cpu().numpy() > 0.5
         if mask.shape != (media["height"], media["width"]):
-            import cv2
-
-            mask = cv2.resize(
-                mask.astype(np.uint8),
-                (media["width"], media["height"]),
-                interpolation=cv2.INTER_NEAREST,
-            ).astype(bool)
+            raise ValueError(
+                f"{clip_id} frame {frame_index}: model mask shape {mask.shape} does not match "
+                f"source shape {(media['height'], media['width'])}"
+            )
         mask_rle, bbox = encode_mask(mask)
         rows.append(
             {
@@ -154,16 +151,15 @@ def frame_rows(
 def process_class(
     model: YOLO,
     *,
-    dataset_root: Path,
     clip_id: str,
     video: Path,
+    source: dict[str, Any],
     config: dict[str, Any],
     tracker_path: Path,
     device: str,
     numeric_class_id: int,
     class_id: str,
 ) -> list[dict[str, Any]]:
-    source = load_json(dataset_root / "clips" / clip_id / "source.json")
     run_id = f"yolo26x-seg-tracktrack-{clip_id}"
     inference = config["inference"]
     rows: list[dict[str, Any]] = []
@@ -227,9 +223,9 @@ def process_clip(
         for numeric_class_id, class_id in class_names.items()
         for row in process_class(
             model,
-            dataset_root=dataset_root,
             clip_id=clip_id,
             video=video,
+            source=source,
             config=config,
             tracker_path=tracker_path,
             device=device,
@@ -264,6 +260,8 @@ def updated_source(
     weights_sha256: str,
     raw_output_sha256: str,
     generator_revision: str,
+    config_argument: Path,
+    device: str,
 ) -> dict[str, Any]:
     run_id = f"yolo26x-seg-tracktrack-{clip_id}"
     command = [
@@ -277,12 +275,14 @@ def updated_source(
         "<sha256-pinned-yolo26x-seg.pt>",
         "--reid-weights",
         "<sha256-pinned-yolo26n-cls.pt>",
+        "--config",
+        str(config_argument),
         "--output-dir",
         "<new-ignored-output-directory>",
         "--generator-revision",
         generator_revision,
         "--device",
-        "mps",
+        device,
         "--apply",
     ]
     source["model_runs"] = [
@@ -323,75 +323,93 @@ def stage_dataset(
     weights_path: Path,
     reid_weights_path: Path,
     generator_revision: str,
+    config_argument: Path,
+    device: str,
 ) -> Path:
     stage_parent = Path(tempfile.mkdtemp(prefix="cvbench-dense-stage-", dir=dataset_root.parent))
     stage = stage_parent / dataset_root.name
-    shutil.copytree(dataset_root, stage)
-    config = load_json(config_path)
-    config_bytes = canonical_json(config)
-    config_sha256 = hashlib.sha256(config_bytes).hexdigest()
-    weights_sha256 = sha256_file(weights_path)
-    reid_weights_sha256 = sha256_file(reid_weights_path)
-    if weights_sha256 != config["model"]["weights_sha256"]:
-        raise ValueError("detector weights do not match the pinned config hash")
-    if reid_weights_sha256 != config["reid_model"]["weights_sha256"]:
-        raise ValueError("ReID weights do not match the pinned config hash")
+    try:
+        shutil.copytree(dataset_root, stage)
+        config = load_json(config_path)
+        config_bytes = canonical_json(config)
+        config_sha256 = hashlib.sha256(config_bytes).hexdigest()
+        weights_sha256, _ = verify_pinned_weights(config, weights_path, reid_weights_path)
 
-    descriptor_path = stage / "dataset.yaml"
-    descriptor = yaml.safe_load(descriptor_path.read_text())
-    descriptor["version"] = "0.2.0"
-    descriptor["title"] = "Recovered clean videos dense segmentation tracks"
-    descriptor["description"] = (
-        "Five hash-pinned Pixabay and Pexels videos processed at native cadence with YOLO26x-seg and "
-        "TrackTrack appearance association. Dense model output is pending human review and is not "
-        "ground truth."
-    )
-    descriptor["ontology"]["classes"] = [
-        {"id": "person", "description": "Model-generated mask and track for a visible person."},
-        {"id": "dog", "description": "Model-generated mask and track for a visible dog."},
-    ]
-    descriptor_path.write_text(yaml.safe_dump(descriptor, sort_keys=False))
-
-    artifacts = stage / "artifacts"
-    for path in artifacts.iterdir():
-        if path.is_file():
-            path.unlink()
-    (stage / CONFIG_ARTIFACT).write_bytes(config_bytes)
-
-    for clip in descriptor["clips"]:
-        clip_id = clip["id"]
-        clip_root = stage / clip["path"]
-        generated_tracks = output_root / clip_id / "tracks.jsonl"
-        tracks_sha256 = sha256_file(generated_tracks)
-        shutil.copyfile(generated_tracks, clip_root / "tracks.jsonl")
-        source_path = clip_root / "source.json"
-        source = updated_source(
-            load_json(source_path),
-            clip_id=clip_id,
-            config=config,
-            config_sha256=config_sha256,
-            weights_sha256=weights_sha256,
-            raw_output_sha256=tracks_sha256,
-            generator_revision=generator_revision,
+        descriptor_path = stage / "dataset.yaml"
+        descriptor = yaml.safe_load(descriptor_path.read_text())
+        descriptor["version"] = "0.2.0"
+        descriptor["title"] = "Recovered clean videos dense segmentation tracks"
+        descriptor["description"] = (
+            "Five hash-pinned Pixabay and Pexels videos processed at native cadence with "
+            "YOLO26x-seg and TrackTrack appearance association. Dense model output is pending "
+            "human review and is not ground truth."
         )
-        source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
-    validate_source_recipe(stage)
-    return stage
+        descriptor["ontology"]["classes"] = [
+            {"id": "person", "description": "Model-generated mask and track for a visible person."},
+            {"id": "dog", "description": "Model-generated mask and track for a visible dog."},
+        ]
+        descriptor_path.write_text(yaml.safe_dump(descriptor, sort_keys=False))
+
+        (stage / CONFIG_ARTIFACT).write_bytes(config_bytes)
+
+        for clip in descriptor["clips"]:
+            clip_id = clip["id"]
+            clip_root = stage / clip["path"]
+            generated_tracks = output_root / clip_id / "tracks.jsonl"
+            tracks_sha256 = sha256_file(generated_tracks)
+            shutil.copyfile(generated_tracks, clip_root / "tracks.jsonl")
+            source_path = clip_root / "source.json"
+            source = updated_source(
+                load_json(source_path),
+                clip_id=clip_id,
+                config=config,
+                config_sha256=config_sha256,
+                weights_sha256=weights_sha256,
+                raw_output_sha256=tracks_sha256,
+                generator_revision=generator_revision,
+                config_argument=config_argument,
+                device=device,
+            )
+            source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
+        validate_source_recipe(stage)
+        return stage
+    except BaseException:
+        shutil.rmtree(stage_parent)
+        raise
 
 
 def apply_stage(dataset_root: Path, stage: Path) -> None:
-    for relative in ("dataset.yaml", CONFIG_ARTIFACT):
-        destination = dataset_root / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(stage / relative, destination)
-    old_config = dataset_root / "artifacts" / "recovered-training-config.json"
-    old_config.unlink(missing_ok=True)
-    descriptor = yaml.safe_load((dataset_root / "dataset.yaml").read_text())
-    for clip in descriptor["clips"]:
-        for filename in ("tracks.jsonl", "source.json"):
-            relative = Path(clip["path"]) / filename
-            os.replace(stage / relative, dataset_root / relative)
-    validate_source_recipe(dataset_root)
+    backup_parent = Path(tempfile.mkdtemp(prefix="cvbench-dense-backup-", dir=dataset_root.parent))
+    backup = backup_parent / dataset_root.name
+    try:
+        os.replace(dataset_root, backup)
+    except BaseException:
+        backup_parent.rmdir()
+        raise
+    try:
+        os.replace(stage, dataset_root)
+        try:
+            validate_source_recipe(dataset_root)
+        except BaseException:
+            os.replace(dataset_root, stage)
+            raise
+    except BaseException:
+        os.replace(backup, dataset_root)
+        backup_parent.rmdir()
+        raise
+    shutil.rmtree(backup_parent)
+
+
+def verify_pinned_weights(
+    config: dict[str, Any], weights_path: Path, reid_weights_path: Path
+) -> tuple[str, str]:
+    weights_sha256 = sha256_file(weights_path)
+    if weights_sha256 != config["model"]["weights_sha256"]:
+        raise ValueError("detector weights do not match the pinned config hash")
+    reid_weights_sha256 = sha256_file(reid_weights_path)
+    if reid_weights_sha256 != config["reid_model"]["weights_sha256"]:
+        raise ValueError("ReID weights do not match the pinned config hash")
+    return weights_sha256, reid_weights_sha256
 
 
 def parse_args() -> argparse.Namespace:
@@ -433,12 +451,7 @@ def main() -> None:
         raise ValueError(f"this generator only accepts {DATASET_ID}")
     sources = verified_sources(dataset_root, source_dir)
     config = load_json(config_path)
-    weights_sha256 = sha256_file(weights)
-    if weights_sha256 != config["model"]["weights_sha256"]:
-        raise ValueError("detector weights do not match the pinned config hash")
-    reid_weights_sha256 = sha256_file(reid_weights)
-    if reid_weights_sha256 != config["reid_model"]["weights_sha256"]:
-        raise ValueError("ReID weights do not match the pinned config hash")
+    weights_sha256, reid_weights_sha256 = verify_pinned_weights(config, weights, reid_weights)
     output_root.mkdir(parents=True)
     tracker_path = tracker_yaml(config, output_root, reid_weights)
     model = YOLO(str(weights))
@@ -472,11 +485,11 @@ def main() -> None:
             weights,
             reid_weights,
             args.generator_revision,
+            args.config,
+            args.device,
         )
-        try:
-            apply_stage(dataset_root, stage)
-        finally:
-            shutil.rmtree(stage.parent)
+        apply_stage(dataset_root, stage)
+        shutil.rmtree(stage.parent)
 
 
 if __name__ == "__main__":

@@ -944,8 +944,17 @@ def test_canonical_validation_accepts_compact_source_resolution_mask(tmp_path: P
     ("mutation", "message"),
     [
         (lambda row: row["mask_rle"].update(size=[15, 16]), "size does not match"),
+        (lambda row: row["mask_rle"].update(size=[16]), "too short"),
         (lambda row: row["mask_rle"].update(counts="1"), "runs do not cover"),
         (lambda row: row.update(bbox_xyxy=[1, 2, 9, 13]), "does not match mask_rle bounds"),
+        (lambda row: row["mask_rle"].update(counts="!"), "invalid character"),
+        (lambda row: row["mask_rle"].update(counts="P"), "truncated"),
+        (lambda row: row["mask_rle"].update(counts="O"), "negative run"),
+        (
+            lambda row: row["mask_rle"].update(counts=_encode_coco_rle([16 * 16])),
+            "no foreground pixels",
+        ),
+        (lambda row: row["mask_rle"].update(counts="PPP0"), "media-derived limit"),
     ],
 )
 def test_canonical_validation_rejects_invalid_mask_rle(tmp_path: Path, mutation, message: str) -> None:

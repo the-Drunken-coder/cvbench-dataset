@@ -21,6 +21,8 @@
         "<sha256-pinned-yolo26x-seg.pt>",
         "--reid-weights",
         "<sha256-pinned-yolo26n-cls.pt>",
+        "--config",
+        "scripts/configs/yolo26x-dense-tracking.json",
         "--output-dir",
         "<new-ignored-output-directory>",
         "--generator-revision",
@@ -30,12 +32,12 @@
         "--apply"
       ],
       "config_file": "artifacts/yolo26x-dense-tracking.json",
-      "config_sha256": "1c6a36264c2de959b57f2ea733d29c69ea805b8f90ef4a0a3b5bf065d5a0c6d2",
+      "config_sha256": "f1ce6cb8c59d51affa5bcdaf9c1ee564f66afa2a3e759e7a4567c670d41fe778",
       "license": {
         "spdx": "AGPL-3.0-only",
         "url": "https://github.com/ultralytics/ultralytics/blob/v8.4.120/LICENSE"
       },
-      "model_name": "Ultralytics YOLO26x-seg COCO with Ultralytics YOLO26n-cls COCO ReID",
+      "model_name": "Ultralytics YOLO26x-seg COCO with Ultralytics YOLO26n-cls ImageNet ReID",
       "model_version": "YOLO26x-seg / ultralytics 8.4.120 + YOLO26n-cls / ultralytics 8.4.120",
       "raw_output_sha256": "67afd6872cbf0aa198e590182123bf0aa577c0290aa2c68965e7445a4f6ef69f",
       "run_id": "yolo26x-seg-tracktrack-pixabay-28855-ravine",
@@ -58,7 +60,7 @@
   "transformations": [
     {
       "config_file": "artifacts/yolo26x-dense-tracking.json",
-      "config_sha256": "1c6a36264c2de959b57f2ea733d29c69ea805b8f90ef4a0a3b5bf065d5a0c6d2",
+      "config_sha256": "f1ce6cb8c59d51affa5bcdaf9c1ee564f66afa2a3e759e7a4567c670d41fe778",
       "description": "Processed every native source frame for person and dog instances; media bytes are unchanged.",
       "kind": "dense_model_annotation",
       "tool": "scripts/generate_dense_tracks.py at ed4e38a"

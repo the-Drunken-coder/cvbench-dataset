@@ -11,7 +11,7 @@
     }
   },
   "reid_model": {
-    "name": "Ultralytics YOLO26n-cls COCO",
+    "name": "Ultralytics YOLO26n-cls ImageNet",
     "version": "YOLO26n-cls / ultralytics 8.4.120",
     "weights_uri": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n-cls.pt",
     "weights_sha256": "0dd6f8dbc448870ac98a3cbb7156f923f7ce21fed3755d4019169ffffd279e81",

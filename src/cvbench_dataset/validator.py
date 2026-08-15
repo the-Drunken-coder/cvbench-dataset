@@ -19,18 +19,25 @@ TOP_LEVEL_NAMES = {"artifacts", "clips", "dataset.yaml", "licenses", "release-ma
 MODEL_ORIGINS = {"model_assisted", "model_generated"}
 
 
-def _decode_coco_rle(counts: str, context: str) -> list[int]:
+def _decode_coco_rle(counts: str, area: int, context: str) -> list[int]:
     """Decode the compact COCO RLE string without requiring annotation dependencies."""
+    max_chunks = max(1, (area.bit_length() + 5) // 5)
+    if len(counts) > (area + 1) * max_chunks:
+        raise DatasetError(f"{context}: mask_rle counts exceed the media-derived limit")
     runs: list[int] = []
     position = 0
     while position < len(counts):
         value = 0
         shift = 0
+        chunks = 0
         while True:
             code = ord(counts[position]) - 48
             position += 1
             if not 0 <= code <= 63:
                 raise DatasetError(f"{context}: mask_rle counts contain an invalid character")
+            chunks += 1
+            if chunks > max_chunks:
+                raise DatasetError(f"{context}: mask_rle run exceeds the media-derived limit")
             value |= (code & 0x1F) << shift
             shift += 5
             if not code & 0x20:
@@ -43,6 +50,8 @@ def _decode_coco_rle(counts: str, context: str) -> list[int]:
             value += runs[-2]
         if value < 0:
             raise DatasetError(f"{context}: mask_rle contains a negative run")
+        if len(runs) >= area + 1:
+            raise DatasetError(f"{context}: mask_rle has too many runs for the declared media")
         runs.append(value)
     return runs
 
@@ -78,8 +87,9 @@ def _validate_mask(row: dict[str, Any], media: dict[str, Any], context: str) -> 
     expected_size = [media["height"], media["width"]]
     if mask["size"] != expected_size:
         raise DatasetError(f"{context}: mask_rle size does not match the declared media")
-    runs = _decode_coco_rle(mask["counts"], context)
-    if sum(runs) != media["height"] * media["width"]:
+    area = media["height"] * media["width"]
+    runs = _decode_coco_rle(mask["counts"], area, context)
+    if sum(runs) != area:
         raise DatasetError(f"{context}: mask_rle runs do not cover the declared media")
     if row["bbox_xyxy"] != _mask_bbox(runs, media["height"], context):
         raise DatasetError(f"{context}: bbox_xyxy does not match mask_rle bounds")
