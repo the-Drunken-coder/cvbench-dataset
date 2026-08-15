@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
+import signal
+import stat
+import subprocess
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 import yaml
 
 import cvbench_dataset.manifest as manifest_module
 import cvbench_dataset.source_recipe as source_recipe_module
+import cvbench_dataset.validator as validator_module
 from cvbench_dataset import (
     DatasetError,
     build_release,
@@ -27,6 +34,21 @@ from cvbench_dataset.cli import main
 
 ROOT = Path(__file__).parents[1]
 SAMPLE = ROOT / "examples" / "minimal-certified"
+
+
+@pytest.fixture(scope="module")
+def dense_generator() -> ModuleType:
+    pytest.importorskip("ultralytics")
+    script = ROOT / "scripts" / "generate_dense_tracks.py"
+    spec = importlib.util.spec_from_file_location("cvbench_dense_generator", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    original_path = sys.path.copy()
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = original_path
+    return module
 
 
 def _copy_sample(tmp_path: Path) -> Path:
@@ -146,6 +168,45 @@ def _studio_zip(tmp_path: Path, *, review_body: bytes = b"", unsafe_name: str | 
 
 def _write_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def _encode_coco_rle(runs: list[int]) -> str:
+    encoded: list[str] = []
+    for index, original in enumerate(runs):
+        value = original - runs[index - 2] if index > 2 else original
+        while True:
+            code = value & 0x1F
+            value >>= 5
+            more = value != (-1 if code & 0x10 else 0)
+            if more:
+                code |= 0x20
+            encoded.append(chr(code + 48))
+            if not more:
+                break
+    return "".join(encoded)
+
+
+def _rectangle_runs() -> list[int]:
+    pixels = [0] * (16 * 16)
+    for x in range(2, 9):
+        for y in range(2, 13):
+            pixels[x * 16 + y] = 1
+    runs: list[int] = []
+    current = 0
+    length = 0
+    for pixel in pixels:
+        if pixel == current:
+            length += 1
+        else:
+            runs.append(length)
+            current = pixel
+            length = 1
+    runs.append(length)
+    return runs
+
+
+def _rectangle_rle() -> dict:
+    return {"size": [16, 16], "counts": _encode_coco_rle(_rectangle_runs())}
 
 
 def test_init_creates_a_valid_empty_draft(tmp_path: Path) -> None:
@@ -896,6 +957,65 @@ def test_source_recipe_rejects_non_finite_confidence(tmp_path: Path) -> None:
         validate_source_recipe(recipe)
 
 
+def test_canonical_validation_accepts_compact_source_resolution_mask(tmp_path: Path) -> None:
+    dataset = _draft_destination(tmp_path)
+    tracks = dataset / "clips" / "synthetic-clip" / "tracks.jsonl"
+    rows = [json.loads(line) for line in tracks.read_text().splitlines()]
+    rows[0]["mask_rle"] = _rectangle_rle()
+    tracks.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    assert validate_dataset(dataset, require_manifest=False).annotation_rows == 2
+
+
+def test_mask_validation_rejects_unsupported_dimensions_before_decoding() -> None:
+    width = validator_module.MAX_MASK_DIMENSION + 1
+    row = {
+        "bbox_xyxy": [0, 0, 1, 1],
+        "mask_rle": {"size": [1, width], "counts": "P" * 20_001 + "0"},
+    }
+    with pytest.raises(DatasetError, match="dimensions exceed the supported limit"):
+        validator_module._validate_mask(row, {"height": 1, "width": width}, "test mask")
+
+
+def test_rle_decoder_rejects_implementation_length_limit() -> None:
+    counts = "0" * (validator_module.MAX_MASK_RLE_CHARACTERS + 1)
+    with pytest.raises(DatasetError, match="counts exceed the implementation limit"):
+        validator_module._decode_coco_rle(counts, 256, "test mask")
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda row: row["mask_rle"].update(size=[15, 16]), "size does not match"),
+        (lambda row: row["mask_rle"].update(size=[16]), "too short"),
+        (lambda row: row["mask_rle"].update(counts="1"), "runs do not cover"),
+        (lambda row: row.update(bbox_xyxy=[1, 2, 9, 13]), "does not match mask_rle bounds"),
+        (lambda row: row["mask_rle"].update(counts="!"), "invalid character"),
+        (lambda row: row["mask_rle"].update(counts="P"), "truncated"),
+        (lambda row: row["mask_rle"].update(counts="O"), "negative run"),
+        (
+            lambda row: row["mask_rle"].update(counts=_encode_coco_rle([16 * 16])),
+            "no foreground pixels",
+        ),
+        (lambda row: row["mask_rle"].update(counts="PPP0"), "media-derived limit"),
+        (
+            lambda row: row["mask_rle"].update(
+                counts=_encode_coco_rle([*_rectangle_runs(), 0, 0])
+            ),
+            "not canonical",
+        ),
+    ],
+)
+def test_canonical_validation_rejects_invalid_mask_rle(tmp_path: Path, mutation, message: str) -> None:
+    dataset = _draft_destination(tmp_path)
+    tracks = dataset / "clips" / "synthetic-clip" / "tracks.jsonl"
+    rows = [json.loads(line) for line in tracks.read_text().splitlines()]
+    rows[0]["mask_rle"] = _rectangle_rle()
+    mutation(rows[0])
+    tracks.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    with pytest.raises(DatasetError, match=message):
+        validate_dataset(dataset, require_manifest=False)
+
+
 def test_source_recipe_rejects_non_model_labels(tmp_path: Path) -> None:
     recipe, _ = _source_recipe(tmp_path)
     tracks = recipe / "clips" / "synthetic-clip" / "tracks.jsonl"
@@ -1565,3 +1685,453 @@ def test_studio_contribution_cannot_inject_review_approvals(tmp_path: Path) -> N
     with pytest.raises(DatasetError, match="empty draft review"):
         import_contribution(dataset, contribution)
     assert not (dataset / "clips" / "imported-clip").exists()
+
+
+def test_dense_generator_syncs_staged_files_and_directories(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "stage"
+    nested = root / "clips"
+    nested.mkdir(parents=True)
+    (nested / "tracks.jsonl").write_text("{}\n")
+    synced_modes: list[int] = []
+
+    monkeypatch.setattr(
+        dense_generator.os,
+        "fsync",
+        lambda descriptor: synced_modes.append(os.fstat(descriptor).st_mode),
+    )
+    dense_generator.sync_tree(root)
+
+    assert sum(stat.S_ISREG(mode) for mode in synced_modes) == 1
+    assert sum(stat.S_ISDIR(mode) for mode in synced_modes) == 2
+
+
+def test_dense_generator_rejects_pythonpath_before_importing_modules(tmp_path: Path) -> None:
+    override = tmp_path / "override"
+    override.mkdir()
+    marker = tmp_path / "imported"
+    (override / "subprocess.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('imported')\n"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(override)
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "generate_dense_tracks.py"), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "python -I" in result.stderr
+    assert not marker.exists()
+
+
+def test_dense_generator_rejects_non_locked_isolated_environment() -> None:
+    environment = os.environ.copy()
+    environment.pop("UV_RUN_RECURSION_DEPTH", None)
+    result = subprocess.run(
+        [sys.executable, "-I", str(ROOT / "scripts" / "generate_dense_tracks.py"), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert (
+        "uv run --frozen --isolated --all-extras --no-editable "
+        "python -I -S -X pycache_prefix=/dev/null"
+    ) in result.stderr
+
+
+def test_dense_generator_uses_owned_lock_and_disables_git_replacements(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "dataset"
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "alternate.git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "alternate-worktree"))
+
+    assert dense_generator.publication_lock_path(dataset) == tmp_path / ".dataset.publication.lock"
+    assert dense_generator.git_command("show", "HEAD:file") == [
+        "/usr/bin/git",
+        "--no-replace-objects",
+        "show",
+        "HEAD:file",
+    ]
+    git_environment = dense_generator.git_environment()
+    assert {key for key in git_environment if key.startswith("GIT_")} == {
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_SYSTEM",
+    }
+    if not Path("/usr/bin/git").exists():
+        pytest.skip("the pinned git executable is not present on this host")
+    assert (
+        subprocess.run(
+            ["/usr/bin/git", "check-ignore", "--quiet", "datasets/.sample.publication.lock"],
+            cwd=ROOT,
+            check=False,
+            env=git_environment,
+        ).returncode
+        == 0
+    )
+
+
+def test_dense_generator_fingerprint_binds_installed_bytes(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    site_packages = tmp_path / "lib" / "python3.12" / "site-packages"
+    package = site_packages / "example"
+    package.mkdir(parents=True)
+    source = package / "__init__.py"
+    source.write_text("VALUE = 1\n")
+    monkeypatch.setattr(dense_generator, "locked_environment_root", lambda: tmp_path)
+    monkeypatch.setattr(dense_generator, "locked_site_packages", lambda: site_packages)
+
+    original = dense_generator.site_packages_fingerprint()
+    source.write_text("VALUE = 2\n")
+
+    assert dense_generator.site_packages_fingerprint() != original
+
+
+def test_dense_generator_fingerprint_binds_sourceless_bytecode(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    site_packages = tmp_path / "lib" / "python3.12" / "site-packages"
+    site_packages.mkdir(parents=True)
+    bytecode = site_packages / "sitecustomize.pyc"
+    bytecode.write_bytes(b"first")
+    monkeypatch.setattr(dense_generator, "locked_environment_root", lambda: tmp_path)
+    monkeypatch.setattr(dense_generator, "locked_site_packages", lambda: site_packages)
+
+    original = dense_generator.site_packages_fingerprint()
+    bytecode.write_bytes(b"second")
+
+    assert dense_generator.site_packages_fingerprint() != original
+
+
+def test_dense_generator_fingerprint_binds_python_runtime_bytes(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "python"
+    stdlib = tmp_path / "stdlib"
+    stdlib.mkdir()
+    executable.write_bytes(b"python-runtime")
+    module = stdlib / "module.py"
+    module.write_text("VALUE = 1\n")
+    monkeypatch.setattr(dense_generator.sys, "executable", str(executable))
+    monkeypatch.setattr(
+        dense_generator.sysconfig, "get_paths", lambda: {"stdlib": str(stdlib)}
+    )
+
+    original = dense_generator.python_runtime_fingerprint()
+    module.write_text("VALUE = 2\n")
+
+    assert dense_generator.python_runtime_fingerprint() != original
+
+
+def test_dense_generator_replay_uses_config_from_recorded_revision(
+    dense_generator: ModuleType,
+) -> None:
+    config = {
+        "model": {
+            "name": "detector",
+            "version": "1",
+            "weights_uri": "https://example.invalid/detector.pt",
+            "license": {"spdx": "MIT"},
+        },
+        "reid_model": {"name": "reid", "version": "1"},
+    }
+    updated = dense_generator.updated_source(
+        {},
+        clip_id="clip",
+        config=config,
+        config_sha256="1" * 64,
+        weights_sha256="2" * 64,
+        raw_output_sha256="3" * 64,
+        generator_revision="4" * 40,
+        device="mps",
+    )
+    command = updated["model_runs"][0]["command"]
+
+    assert command[command.index("--config") + 1] == dense_generator.CONFIG_SOURCE
+    assert command[command.index("python") + 1 : command.index("-X")] == ["-I", "-S"]
+
+
+def test_dense_publication_commits_exchange_before_removing_old_tree(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "dataset"
+    stage_parent = tmp_path / "stage-parent"
+    stage = stage_parent / "dataset"
+    dataset.mkdir()
+    stage.mkdir(parents=True)
+    expected = {"dataset.yaml": "file:hash"}
+    events: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(dense_generator, "publication_lock_path", lambda _: tmp_path / "lock")
+    monkeypatch.setattr(dense_generator, "tree_hashes", lambda _: expected)
+    monkeypatch.setattr(
+        dense_generator, "sync_tree", lambda path: events.append(("sync-tree", path))
+    )
+    monkeypatch.setattr(
+        dense_generator, "sync_directory", lambda path: events.append(("sync-directory", path))
+    )
+    monkeypatch.setattr(
+        dense_generator,
+        "sync_exchange_parents",
+        lambda left, right: events.append(("sync-exchange", (left, right))),
+    )
+    monkeypatch.setattr(
+        dense_generator,
+        "exchange_directories",
+        lambda left, right: events.append(("exchange", (left, right))),
+    )
+    monkeypatch.setattr(
+        dense_generator,
+        "validate_source_recipe",
+        lambda path: events.append(("validate", path)),
+    )
+    monkeypatch.setattr(
+        dense_generator.shutil,
+        "rmtree",
+        lambda path: events.append(("remove-old", path)),
+    )
+
+    dense_generator.apply_stage(dataset, stage, expected)
+
+    assert events == [
+        ("sync-directory", tmp_path),
+        ("sync-tree", stage),
+        ("sync-directory", stage_parent),
+        ("exchange", (dataset, stage)),
+        ("sync-exchange", (dataset, stage)),
+        ("validate", dataset),
+        ("remove-old", stage),
+        ("sync-directory", stage_parent),
+    ]
+
+
+def test_dense_publication_preserves_recovery_intent_after_exchange_interrupt(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "dataset"
+    stage = tmp_path / "stage-parent" / "dataset"
+    dataset.mkdir()
+    stage.mkdir(parents=True)
+    expected = {"dataset.yaml": "file:hash"}
+    exchanges: list[tuple[Path, ...]] = []
+    parent_syncs = 0
+    blocked: set[signal.Signals] = set()
+
+    def exchange(*paths: Path) -> None:
+        exchanges.append(paths)
+
+    def record_mask(
+        operation: int, signals: set[signal.Signals]
+    ) -> set[signal.Signals]:
+        if operation == signal.SIG_BLOCK:
+            blocked.update(signals)
+            return set()
+        return set()
+
+    def interrupt_after_exchange(*_: Path) -> None:
+        nonlocal parent_syncs
+        parent_syncs += 1
+        if parent_syncs == 1:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(dense_generator, "publication_lock_path", lambda _: tmp_path / "lock")
+    monkeypatch.setattr(dense_generator, "tree_hashes", lambda _: expected)
+    monkeypatch.setattr(dense_generator, "sync_tree", lambda _: None)
+    monkeypatch.setattr(dense_generator, "sync_directory", lambda _: None)
+    monkeypatch.setattr(dense_generator, "sync_exchange_parents", interrupt_after_exchange)
+    monkeypatch.setattr(dense_generator, "exchange_directories", exchange)
+    monkeypatch.setattr(dense_generator.signal, "pthread_sigmask", record_mask)
+
+    with pytest.raises(KeyboardInterrupt):
+        dense_generator.apply_stage(dataset, stage, expected)
+
+    assert blocked == {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+    assert exchanges == [(dataset, stage)]
+    assert (tmp_path / "lock").read_bytes()
+
+
+def test_dense_publication_recovers_durable_unfinished_exchange(
+    dense_generator: ModuleType, tmp_path: Path
+) -> None:
+    dataset = tmp_path / "dataset"
+    stage = tmp_path / "stage-parent" / "dataset"
+    dataset.mkdir()
+    stage.mkdir(parents=True)
+    (dataset / "state.txt").write_text("previous\n")
+    (stage / "state.txt").write_text("next\n")
+    intent = {
+        "schema_version": "cvbench.publication-intent/v1",
+        "phase": "exchanged",
+        "dataset_root": str(dataset.resolve()),
+        "stage": str(stage.resolve()),
+        "previous_sha256": dense_generator.inventory_sha256(
+            dense_generator.tree_hashes(dataset)
+        ),
+        "next_sha256": dense_generator.inventory_sha256(dense_generator.tree_hashes(stage)),
+    }
+    lock_path = tmp_path / "publication.lock"
+
+    with lock_path.open("w+b") as lock:
+        dense_generator.write_publication_intent(lock, intent)
+        dense_generator.exchange_directories(dataset, stage)
+        dense_generator.sync_exchange_parents(dataset, stage)
+        dense_generator.recover_publication(lock, dataset)
+        lock.seek(0)
+        assert lock.read() == b""
+
+    assert (dataset / "state.txt").read_text() == "next\n"
+    assert not stage.exists()
+
+
+def test_dense_publication_recovers_from_torn_phase_append(
+    dense_generator: ModuleType, tmp_path: Path
+) -> None:
+    dataset = tmp_path / "dataset"
+    stage = tmp_path / "stage-parent" / "dataset"
+    dataset.mkdir()
+    stage.mkdir(parents=True)
+    (dataset / "state.txt").write_text("previous\n")
+    (stage / "state.txt").write_text("next\n")
+    intent = {
+        "schema_version": "cvbench.publication-intent/v1",
+        "phase": "prepared",
+        "dataset_root": str(dataset.resolve()),
+        "stage": str(stage.resolve()),
+        "previous_sha256": dense_generator.inventory_sha256(
+            dense_generator.tree_hashes(dataset)
+        ),
+        "next_sha256": dense_generator.inventory_sha256(dense_generator.tree_hashes(stage)),
+    }
+    lock_path = tmp_path / "publication.lock"
+
+    with lock_path.open("w+b") as lock:
+        dense_generator.write_publication_intent(lock, intent)
+        dense_generator.exchange_directories(dataset, stage)
+        dense_generator.sync_exchange_parents(dataset, stage)
+        lock.seek(0, os.SEEK_END)
+        lock.write(b'{"phase":"exchanged"')
+        lock.flush()
+        os.fsync(lock.fileno())
+        dense_generator.recover_publication(lock, dataset)
+        lock.seek(0)
+        assert lock.read() == b""
+
+    assert (dataset / "state.txt").read_text() == "next\n"
+    assert not stage.exists()
+
+
+def test_dense_publication_preserves_failed_validation_for_recovery(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "dataset"
+    stage = tmp_path / "stage-parent" / "dataset"
+    dataset.mkdir()
+    stage.mkdir(parents=True)
+    expected = {"dataset.yaml": "file:hash"}
+    events: list[tuple[str, object]] = []
+
+    def fail_validation(path: Path) -> None:
+        events.append(("validate", path))
+        raise ValueError("invalid publication")
+
+    monkeypatch.setattr(dense_generator, "publication_lock_path", lambda _: tmp_path / "lock")
+    monkeypatch.setattr(dense_generator, "tree_hashes", lambda _: expected)
+    monkeypatch.setattr(dense_generator, "sync_tree", lambda _: None)
+    monkeypatch.setattr(dense_generator, "sync_directory", lambda _: None)
+    monkeypatch.setattr(
+        dense_generator,
+        "sync_exchange_parents",
+        lambda left, right: events.append(("sync-exchange", (left, right))),
+    )
+    monkeypatch.setattr(
+        dense_generator,
+        "exchange_directories",
+        lambda left, right: events.append(("exchange", (left, right))),
+    )
+    monkeypatch.setattr(
+        dense_generator,
+        "validate_source_recipe",
+        fail_validation,
+    )
+    monkeypatch.setattr(
+        dense_generator.shutil,
+        "rmtree",
+        lambda _: pytest.fail("a failed publication must preserve both trees"),
+    )
+
+    with pytest.raises(ValueError, match="invalid publication"):
+        dense_generator.apply_stage(dataset, stage, expected)
+
+    assert events == [
+        ("exchange", (dataset, stage)),
+        ("sync-exchange", (dataset, stage)),
+        ("validate", dataset),
+    ]
+    assert (tmp_path / "lock").read_bytes()
+
+
+def test_dense_publication_reports_recovery_paths(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "dataset"
+    stage = tmp_path / "stage-parent" / "dataset"
+    dataset.mkdir()
+    stage.mkdir(parents=True)
+    expected = {"dataset.yaml": "file:hash"}
+    monkeypatch.setattr(dense_generator, "publication_lock_path", lambda _: tmp_path / "lock")
+    monkeypatch.setattr(dense_generator, "tree_hashes", lambda _: expected)
+    monkeypatch.setattr(dense_generator, "sync_tree", lambda _: None)
+    monkeypatch.setattr(dense_generator, "sync_directory", lambda _: None)
+    monkeypatch.setattr(dense_generator, "sync_exchange_parents", lambda *_: None)
+    monkeypatch.setattr(dense_generator, "exchange_directories", lambda *_: None)
+    monkeypatch.setattr(
+        dense_generator,
+        "validate_source_recipe",
+        lambda _: (_ for _ in ()).throw(ValueError("invalid publication")),
+    )
+
+    with pytest.raises(ValueError, match="invalid publication") as failure:
+        dense_generator.apply_stage(dataset, stage, expected)
+
+    note = "\n".join(failure.value.__notes__)
+    assert str(dataset) in note
+    assert str(stage) in note
+    assert str(tmp_path / "lock") in note
+
+
+def test_dense_publication_preserves_concurrent_update_instead_of_rollback(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "dataset"
+    stage = tmp_path / "stage-parent" / "dataset"
+    dataset.mkdir()
+    stage.mkdir(parents=True)
+    (dataset / "state.txt").write_text("previous\n")
+    (stage / "state.txt").write_text("next\n")
+    expected = dense_generator.tree_hashes(dataset)
+
+    def mutate_then_fail(path: Path) -> None:
+        (path / "concurrent.txt").write_text("preserve me\n")
+        raise ValueError("invalid publication")
+
+    monkeypatch.setattr(dense_generator, "publication_lock_path", lambda _: tmp_path / "lock")
+    monkeypatch.setattr(dense_generator, "validate_source_recipe", mutate_then_fail)
+
+    with pytest.raises(ValueError, match="invalid publication"):
+        dense_generator.apply_stage(dataset, stage, expected)
+
+    assert (dataset / "state.txt").read_text() == "next\n"
+    assert (dataset / "concurrent.txt").read_text() == "preserve me\n"
+    assert (stage / "state.txt").read_text() == "previous\n"
+    assert (tmp_path / "lock").read_bytes()

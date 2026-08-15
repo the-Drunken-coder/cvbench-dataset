@@ -9,28 +9,38 @@
   },
   "model_runs": [
     {
-      "code_revision": "c3c32f728482ad8d3ad6da2fcb0439992d9f19d5",
+      "code_revision": "ed4e38a",
       "command": [
         "python",
-        "-m",
-        "cvbench.recovered_training",
-        "--sample-fps",
-        "5.0",
-        "--confidence-threshold",
-        "0.25"
+        "scripts/generate_dense_tracks.py",
+        "--dataset-root",
+        "datasets/recovered-clean-videos-v1",
+        "--source-dir",
+        "<verified-originals>",
+        "--weights",
+        "<sha256-pinned-yolo26x-seg.pt>",
+        "--reid-weights",
+        "<sha256-pinned-yolo26n-cls.pt>",
+        "--output-dir",
+        "<new-ignored-output-directory>",
+        "--generator-revision",
+        "ed4e38a",
+        "--device",
+        "mps",
+        "--apply"
       ],
-      "config_file": "artifacts/recovered-training-config.json",
-      "config_sha256": "ab1411538a316e5286777104ee2af260ef3cf8cd339c32491a1e3c2e5ba2ac09",
+      "config_file": "artifacts/yolo26x-dense-tracking.json",
+      "config_sha256": "1c6a36264c2de959b57f2ea733d29c69ea805b8f90ef4a0a3b5bf065d5a0c6d2",
       "license": {
-        "spdx": "Apache-2.0",
-        "url": "https://github.com/Megvii-BaseDetection/YOLOX/blob/main/LICENSE"
+        "spdx": "AGPL-3.0-only",
+        "url": "https://github.com/ultralytics/ultralytics/blob/v8.4.120/LICENSE"
       },
-      "model_name": "Megvii YOLOX-X COCO 640 ONNX",
-      "model_version": "YOLOX-X COCO 640 ONNX",
-      "raw_output_sha256": "9d2327880b3d5639ea68b2063dabedb3a53ea94dba422a07dc4de2c19afac617",
-      "run_id": "yolox-x-pexels-18187166-dune",
-      "weights_sha256": "c892d7aaf1c4746d8a4d675bec669a4db4f434b4ee1efb654bc9b353379c7c55",
-      "weights_uri": "docker://cvbench-example-advanced-mot@sha256:bc04a103d4c2e1698d4818c39a84b1bb229a4c0243ea8aae806b9bcdd624c5ac#/app/models/yolox_x.onnx"
+      "model_name": "Ultralytics YOLO26x-seg COCO with Ultralytics YOLO26n-cls ImageNet ReID",
+      "model_version": "YOLO26x-seg / ultralytics 8.4.120 + YOLO26n-cls / ultralytics 8.4.120",
+      "raw_output_sha256": "2e18d86045a2ed28550e85e019a7e3f1daadabc9e4a8720a102b989b02182d2a",
+      "run_id": "yolo26x-seg-tracktrack-pexels-18187166-dune",
+      "weights_sha256": "92b3de0065766a17180d6219858717dc9d03cdce8a3ca9576c97fd75aabb64f3",
+      "weights_uri": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26x-seg.pt"
     }
   ],
   "schema_version": "cvbench.source/v1",
@@ -47,11 +57,11 @@
   },
   "transformations": [
     {
-      "config_file": "artifacts/recovered-training-config.json",
-      "config_sha256": "ab1411538a316e5286777104ee2af260ef3cf8cd339c32491a1e3c2e5ba2ac09",
-      "description": "Sampled source frames at 5 FPS for non-exhaustive model proposals. Media bytes are unchanged.",
-      "kind": "annotation_sampling",
-      "tool": "cvbench.recovered_training at c3c32f728482ad8d3ad6da2fcb0439992d9f19d5"
+      "config_file": "artifacts/yolo26x-dense-tracking.json",
+      "config_sha256": "1c6a36264c2de959b57f2ea733d29c69ea805b8f90ef4a0a3b5bf065d5a0c6d2",
+      "description": "Processed every native source frame for person and dog instances; media bytes are unchanged.",
+      "kind": "dense_model_annotation",
+      "tool": "scripts/generate_dense_tracks.py at ed4e38a"
     }
   ]
 }

@@ -17,6 +17,110 @@ from .schema import SCHEMA_NAMES, schema_bytes, validate_schema
 CLIP_FILENAMES = {"review.jsonl", "source.json", "tracks.jsonl", "video.mp4"}
 TOP_LEVEL_NAMES = {"artifacts", "clips", "dataset.yaml", "licenses", "release-manifest.json", "schemas"}
 MODEL_ORIGINS = {"model_assisted", "model_generated"}
+MAX_MASK_DIMENSION = 32_768
+MAX_MASK_PIXELS = 268_435_456
+MAX_MASK_RLE_CHARACTERS = 1_000_000
+MAX_MASK_RLE_RUN_CHUNKS = 8
+
+
+def _decode_coco_rle(counts: str, area: int, context: str) -> list[int]:
+    """Decode the compact COCO RLE string without requiring annotation dependencies."""
+    if len(counts) > MAX_MASK_RLE_CHARACTERS:
+        raise DatasetError(f"{context}: mask_rle counts exceed the implementation limit")
+    max_chunks = min(MAX_MASK_RLE_RUN_CHUNKS, max(1, (area.bit_length() + 5) // 5))
+    if len(counts) > (area + 1) * max_chunks:
+        raise DatasetError(f"{context}: mask_rle counts exceed the media-derived limit")
+    runs: list[int] = []
+    position = 0
+    while position < len(counts):
+        value = 0
+        shift = 0
+        chunks = 0
+        while True:
+            code = ord(counts[position]) - 48
+            position += 1
+            if not 0 <= code <= 63:
+                raise DatasetError(f"{context}: mask_rle counts contain an invalid character")
+            chunks += 1
+            if chunks > max_chunks:
+                raise DatasetError(f"{context}: mask_rle run exceeds the media-derived limit")
+            value |= (code & 0x1F) << shift
+            shift += 5
+            if not code & 0x20:
+                if code & 0x10:
+                    value |= -1 << shift
+                break
+            if position >= len(counts):
+                raise DatasetError(f"{context}: mask_rle counts are truncated")
+        if len(runs) > 2:
+            value += runs[-2]
+        if value < 0:
+            raise DatasetError(f"{context}: mask_rle contains a negative run")
+        if len(runs) >= area + 1:
+            raise DatasetError(f"{context}: mask_rle has too many runs for the declared media")
+        runs.append(value)
+    return runs
+
+
+def _encode_coco_rle(runs: list[int]) -> str:
+    encoded: list[str] = []
+    for index, original in enumerate(runs):
+        value = original - runs[index - 2] if index > 2 else original
+        while True:
+            code = value & 0x1F
+            value >>= 5
+            more = value != (-1 if code & 0x10 else 0)
+            if more:
+                code |= 0x20
+            encoded.append(chr(code + 48))
+            if not more:
+                break
+    return "".join(encoded)
+
+
+def _mask_bbox(runs: list[int], height: int, context: str) -> list[int]:
+    offset = 0
+    bounds: list[int] | None = None
+    for index, length in enumerate(runs):
+        end = offset + length
+        if index % 2 and length:
+            start_x, start_y = divmod(offset, height)
+            end_x, end_y = divmod(end - 1, height)
+            low_y, high_y = (0, height - 1) if start_x != end_x else (start_y, end_y)
+            if bounds is None:
+                bounds = [start_x, low_y, end_x + 1, high_y + 1]
+            else:
+                bounds = [
+                    min(bounds[0], start_x),
+                    min(bounds[1], low_y),
+                    max(bounds[2], end_x + 1),
+                    max(bounds[3], high_y + 1),
+                ]
+        offset = end
+    if bounds is None:
+        raise DatasetError(f"{context}: mask_rle has no foreground pixels")
+    return bounds
+
+
+def _validate_mask(row: dict[str, Any], media: dict[str, Any], context: str) -> None:
+    mask = row.get("mask_rle")
+    if mask is None:
+        return
+    expected_size = [media["height"], media["width"]]
+    if mask["size"] != expected_size:
+        raise DatasetError(f"{context}: mask_rle size does not match the declared media")
+    if media["width"] > MAX_MASK_DIMENSION or media["height"] > MAX_MASK_DIMENSION:
+        raise DatasetError(f"{context}: mask_rle media dimensions exceed the supported limit")
+    area = media["height"] * media["width"]
+    if area > MAX_MASK_PIXELS:
+        raise DatasetError(f"{context}: mask_rle media area exceeds the supported limit")
+    runs = _decode_coco_rle(mask["counts"], area, context)
+    if any(length == 0 for length in runs[1:]) or _encode_coco_rle(runs) != mask["counts"]:
+        raise DatasetError(f"{context}: mask_rle counts are not canonical")
+    if sum(runs) != area:
+        raise DatasetError(f"{context}: mask_rle runs do not cover the declared media")
+    if row["bbox_xyxy"] != _mask_bbox(runs, media["height"], context):
+        raise DatasetError(f"{context}: bbox_xyxy does not match mask_rle bounds")
 
 
 def sha256_file(path: Path) -> str:
@@ -220,6 +324,7 @@ def _validate_tracks(
             raise DatasetError(f"{context}: bbox coordinates must be finite")
         if not (0 <= box[0] < box[2] <= media["width"] and 0 <= box[1] < box[3] <= media["height"]):
             raise DatasetError(f"{context}: bbox_xyxy lies outside the declared media dimensions")
+        _validate_mask(row, media, context)
 
         confidence = row.get("confidence")
         if confidence is not None and not math.isfinite(confidence):

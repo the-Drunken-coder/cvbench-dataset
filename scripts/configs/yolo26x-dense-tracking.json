@@ -1,0 +1,64 @@
+{
+  "schema_version": "cvbench.dense-tracking-config/v1",
+  "environment": {
+    "python_version": "3.12.13",
+    "platform": "macosx-11.0-arm64",
+    "uv_lock_sha256": "35ed5c8902bf8fe69fb8db6d349c1d9c7c0d8af4324be76bcf7013eb701ac5f4",
+    "python_runtime_sha256": "5599a429d354bcca182e0e50665f81fed62c3fb06be8a0cae61e926d125b0498",
+    "site_packages_sha256": "99024ed1c137e090170d6a00fd79c2f27c8562702f17961fca39e0190efe2268"
+  },
+  "model": {
+    "name": "Ultralytics YOLO26x-seg COCO",
+    "version": "YOLO26x-seg / ultralytics 8.4.120",
+    "weights_uri": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26x-seg.pt",
+    "weights_sha256": "92b3de0065766a17180d6219858717dc9d03cdce8a3ca9576c97fd75aabb64f3",
+    "license": {
+      "spdx": "AGPL-3.0-only",
+      "url": "https://github.com/ultralytics/ultralytics/blob/v8.4.120/LICENSE"
+    }
+  },
+  "reid_model": {
+    "name": "Ultralytics YOLO26n-cls ImageNet",
+    "version": "YOLO26n-cls / ultralytics 8.4.120",
+    "weights_uri": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n-cls.pt",
+    "weights_sha256": "0dd6f8dbc448870ac98a3cbb7156f923f7ce21fed3755d4019169ffffd279e81",
+    "license": {
+      "spdx": "AGPL-3.0-only",
+      "url": "https://github.com/ultralytics/ultralytics/blob/v8.4.120/LICENSE"
+    }
+  },
+  "inference": {
+    "classes": {
+      "0": "person",
+      "16": "dog"
+    },
+    "confidence_threshold": 0.05,
+    "iou_threshold": 0.7,
+    "image_size": 1280,
+    "maximum_detections": 100,
+    "retina_masks": true,
+    "video_stride": 1,
+    "class_isolated_passes": true
+  },
+  "tracker": {
+    "tracker_type": "tracktrack",
+    "track_high_thresh": 0.35,
+    "track_low_thresh": 0.1,
+    "new_track_thresh": 0.35,
+    "track_buffer": 90,
+    "match_thresh": 0.7,
+    "lost_match_thr": 0.85,
+    "iou_weight": 0.5,
+    "reid_weight": 0.5,
+    "conf_weight": 0.1,
+    "angle_weight": 0.05,
+    "penalty_p": 0.2,
+    "penalty_q": 0.4,
+    "reduce_step": 0.05,
+    "tai_thr": 0.55,
+    "min_track_len": 1,
+    "gmc_method": "sparseOptFlow",
+    "with_reid": true,
+    "model": "<reid-weights>"
+  }
+}

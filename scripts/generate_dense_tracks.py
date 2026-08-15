@@ -1,0 +1,1004 @@
+#!/usr/bin/env python3
+"""Generate native-cadence instance masks and tracks for the recovered clips."""
+
+from __future__ import annotations
+
+import sys
+
+# Isolated mode ignores PYTHONPATH, user-site packages, and the script directory. No-site mode
+# also prevents sitecustomize and .pth hooks from running before the environment is verified.
+if __name__ == "__main__" and (not sys.flags.isolated or not sys.flags.no_site):
+    raise RuntimeError(
+        "run with `uv run --frozen --isolated --all-extras --no-editable "
+        "python -I -S -X pycache_prefix=/dev/null`"
+    )
+
+import argparse
+import ctypes
+import fcntl
+import hashlib
+import json
+import os
+import platform
+import shutil
+import signal
+import subprocess
+import sysconfig
+import tempfile
+from pathlib import Path
+from typing import Any
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
+def locked_environment_root() -> Path:
+    virtual_environment = os.environ.get("VIRTUAL_ENV")
+    if virtual_environment is None:
+        raise RuntimeError("VIRTUAL_ENV is required")
+    return Path(virtual_environment).resolve()
+
+
+def locked_site_packages() -> Path:
+    environment_root = locked_environment_root()
+    return Path(
+        sysconfig.get_path(
+            "purelib",
+            scheme="venv",
+            vars={"base": str(environment_root), "platbase": str(environment_root)},
+        )
+    ).resolve()
+
+
+def require_locked_environment() -> None:
+    prefix = locked_environment_root()
+    if (
+        os.environ.get("UV_RUN_RECURSION_DEPTH") != "1"
+        or prefix == REPOSITORY_ROOT
+        or REPOSITORY_ROOT in prefix.parents
+        or sys.pycache_prefix != "/dev/null"
+        or not sys.flags.no_site
+    ):
+        raise RuntimeError(
+            "run with `uv run --frozen --isolated --all-extras --no-editable "
+            "python -I -S -X pycache_prefix=/dev/null`"
+        )
+
+
+CONFIG_ARTIFACT = "artifacts/yolo26x-dense-tracking.json"
+CONFIG_SOURCE = "scripts/configs/yolo26x-dense-tracking.json"
+DATASET_ID = "recovered-clean-videos-v1"
+
+
+def require_locked_project_install() -> None:
+    package_root = locked_site_packages() / "cvbench_dataset"
+    if not package_root.is_dir():
+        raise RuntimeError("cvbench-dataset must be installed non-editably in the isolated environment")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def tree_hashes(root: Path) -> dict[str, str]:
+    """Inventory every source-recipe entry, hashing files and rejecting special nodes."""
+    hashes: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            raise ValueError(f"source recipe cannot contain symlinks: {path}")
+        if path.is_dir():
+            hashes[relative] = "directory"
+        elif path.is_file():
+            hashes[relative] = f"file:{sha256_file(path)}"
+        else:
+            raise ValueError(f"source recipe contains an unsupported entry: {path}")
+    return hashes
+
+
+def publication_lock_path(dataset_root: Path) -> Path:
+    resolved = dataset_root.resolve()
+    return resolved.parent / f".{resolved.name}.publication.lock"
+
+
+def git_command(*arguments: str) -> list[str]:
+    return ["/usr/bin/git", "--no-replace-objects", *arguments]
+
+
+def git_environment() -> dict[str, str]:
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+    )
+    return environment
+
+
+def site_packages_fingerprint() -> str:
+    site_packages = locked_site_packages()
+    prefix = locked_environment_root()
+    if prefix not in site_packages.parents:
+        raise RuntimeError("site-packages is outside the active environment")
+    digest = hashlib.sha256()
+    for path in sorted(site_packages.rglob("*")):
+        relative = path.relative_to(site_packages)
+        if path.is_symlink():
+            raise RuntimeError(f"locked environment contains a symlink: {relative}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise RuntimeError(f"locked environment contains an unsupported entry: {relative}")
+        top_level = relative.parts[0]
+        if top_level == "cvbench_dataset" or (
+            top_level.startswith("cvbench_dataset-") and top_level.endswith(".dist-info")
+        ):
+            continue
+        if path.name in {"RECORD", "direct_url.json"} and path.parent.name.endswith(".dist-info"):
+            continue
+        digest.update(relative.as_posix().encode())
+        digest.update(b"\0")
+        digest.update(bytes.fromhex(sha256_file(path)))
+    return digest.hexdigest()
+
+
+def python_runtime_fingerprint() -> str:
+    executable = Path(sys.executable).resolve()
+    stdlib = Path(sysconfig.get_paths()["stdlib"]).resolve()
+    digest = hashlib.sha256()
+    digest.update(b"executable\0")
+    digest.update(bytes.fromhex(sha256_file(executable)))
+    for path in sorted(stdlib.rglob("*")):
+        relative = path.relative_to(stdlib)
+        if path.is_symlink():
+            raise RuntimeError(f"Python runtime contains a symlink: {relative}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise RuntimeError(f"Python runtime contains an unsupported entry: {relative}")
+        if (
+            "site-packages" in relative.parts
+            or "__pycache__" in relative.parts
+            or path.suffix in {".pyc", ".pyo"}
+        ):
+            continue
+        digest.update(relative.as_posix().encode())
+        digest.update(b"\0")
+        digest.update(bytes.fromhex(sha256_file(path)))
+    return digest.hexdigest()
+
+
+def verify_project_install(revision: str) -> None:
+    package_root = locked_site_packages() / "cvbench_dataset"
+    prefix = locked_environment_root()
+    if prefix not in package_root.parents or REPOSITORY_ROOT in package_root.parents:
+        raise RuntimeError("cvbench-dataset must be installed non-editably in the isolated environment")
+    source_prefix = "src/cvbench_dataset/"
+    tracked = subprocess.run(
+        git_command("ls-tree", "-r", "-z", "--name-only", revision, "--", "src/cvbench_dataset"),
+        cwd=REPOSITORY_ROOT,
+        env=git_environment(),
+        check=True,
+        capture_output=True,
+    ).stdout.decode().split("\0")
+    expected = {path.removeprefix(source_prefix) for path in tracked if path}
+    actual = {
+        path.relative_to(package_root).as_posix()
+        for path in package_root.rglob("*")
+        if path.is_file()
+    }
+    if actual != expected:
+        raise RuntimeError("installed cvbench-dataset file inventory does not match repository HEAD")
+    for relative in sorted(expected):
+        committed = subprocess.run(
+            git_command("show", f"{revision}:{source_prefix}{relative}"),
+            cwd=REPOSITORY_ROOT,
+            env=git_environment(),
+            check=True,
+            capture_output=True,
+        ).stdout
+        if (package_root / relative).read_bytes() != committed:
+            raise RuntimeError(f"installed cvbench-dataset bytes do not match repository HEAD: {relative}")
+
+
+def verify_locked_artifacts(config: dict[str, Any], revision: str) -> None:
+    expected = config["environment"]
+    actual = {
+        "python_version": platform.python_version(),
+        "platform": sysconfig.get_platform(),
+        "uv_lock_sha256": sha256_file(REPOSITORY_ROOT / "uv.lock"),
+        "python_runtime_sha256": python_runtime_fingerprint(),
+        "site_packages_sha256": site_packages_fingerprint(),
+    }
+    if actual != expected:
+        raise RuntimeError(f"installed environment does not match the canonical lock: {actual}")
+    verify_project_install(revision)
+
+
+def activate_locked_site_packages() -> None:
+    """Expose verified packages without executing sitecustomize or .pth startup hooks."""
+    site_packages = locked_site_packages()
+    if not site_packages.is_dir():
+        raise RuntimeError("locked environment site-packages directory is missing")
+    sys.path.append(str(site_packages))
+
+
+def load_dependencies() -> None:
+    global YOLO, mask_utils, np, ultralytics_version, validate_source_recipe, yaml
+
+    import numpy as np_module
+    import yaml as yaml_module
+    from pycocotools import mask as mask_utils_module
+    from ultralytics import YOLO as yolo_class
+    from ultralytics import __version__ as version
+
+    from cvbench_dataset import validate_source_recipe as validate_source_recipe_function
+
+    np = np_module
+    yaml = yaml_module
+    mask_utils = mask_utils_module
+    YOLO = yolo_class
+    ultralytics_version = version
+    validate_source_recipe = validate_source_recipe_function
+
+
+def sync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def sync_tree(root: Path) -> None:
+    """Persist every staged file, then the directory entries that name them."""
+    directories = [root]
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"staged dataset cannot contain symlinks: {path}")
+        if path.is_dir():
+            directories.append(path)
+            continue
+        if not path.is_file():
+            raise ValueError(f"staged dataset contains an unsupported entry: {path}")
+        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+        descriptor = os.open(path, flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+        sync_directory(directory)
+
+
+def sync_exchange_parents(left: Path, right: Path) -> None:
+    for parent in {left.parent, right.parent}:
+        sync_directory(parent)
+
+
+def inventory_sha256(hashes: dict[str, str]) -> str:
+    return hashlib.sha256(canonical_json(hashes)).hexdigest()
+
+
+def write_publication_intent(lock: Any, intent: dict[str, Any] | None) -> None:
+    if intent is None:
+        lock.seek(0)
+        lock.truncate()
+    else:
+        # Keep the previous durable phase until the new record is complete. Recovery ignores a
+        # torn final line, so a crash can never erase the only usable publication intent.
+        lock.seek(0, os.SEEK_END)
+        lock.write(canonical_json(intent))
+    lock.flush()
+    os.fsync(lock.fileno())
+
+
+def recover_publication(lock: Any, dataset_root: Path) -> None:
+    lock.seek(0)
+    records = [line for line in lock.read().splitlines(keepends=True) if line.endswith(b"\n")]
+    if not records:
+        write_publication_intent(lock, None)
+        return
+    intent = json.loads(records[-1])
+    if not isinstance(intent, dict):
+        raise RuntimeError("publication intent is not a JSON object")
+    expected_keys = {
+        "schema_version",
+        "phase",
+        "dataset_root",
+        "stage",
+        "previous_sha256",
+        "next_sha256",
+    }
+    if set(intent) != expected_keys or intent["schema_version"] != "cvbench.publication-intent/v1":
+        raise RuntimeError("publication intent has an unsupported shape")
+    resolved_root = dataset_root.resolve()
+    stage = Path(intent["stage"]).resolve()
+    if (
+        intent["dataset_root"] != str(resolved_root)
+        or stage.name != resolved_root.name
+        or stage.parent.parent != resolved_root.parent
+    ):
+        raise RuntimeError("publication intent targets unexpected paths")
+    phase = intent["phase"]
+    if phase not in {"prepared", "exchanged", "committed"}:
+        raise RuntimeError("publication intent has an unsupported phase")
+    root_sha256 = inventory_sha256(tree_hashes(resolved_root))
+    stage_sha256 = inventory_sha256(tree_hashes(stage)) if stage.is_dir() else None
+    previous_sha256 = intent["previous_sha256"]
+    next_sha256 = intent["next_sha256"]
+    if phase == "committed":
+        if root_sha256 != next_sha256 or stage_sha256 not in {None, previous_sha256}:
+            raise RuntimeError("committed publication intent does not match the filesystem")
+    elif root_sha256 == next_sha256 and stage_sha256 == previous_sha256:
+        # The exact candidate bytes were validated and persisted before the atomic exchange. Once
+        # they own the canonical path, recovery completes publication instead of racing writers by
+        # swapping the directories a second time.
+        pass
+    elif root_sha256 != previous_sha256 or stage_sha256 != next_sha256:
+        raise RuntimeError("unfinished publication intent does not match the filesystem")
+    if stage_sha256 is not None:
+        shutil.rmtree(stage)
+        sync_directory(stage.parent)
+    write_publication_intent(lock, None)
+
+
+def restore_signal_mask(previous_mask: set[signal.Signals]) -> None:
+    try:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    except BaseException as restoration_error:
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        except BaseException as retry_error:
+            retry_error.add_note(f"initial signal-mask restoration failed: {restoration_error!r}")
+            raise
+        raise
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict):
+        raise ValueError(f"expected a JSON object: {path}")
+    return value
+
+
+def canonical_json(value: dict[str, Any]) -> bytes:
+    return (json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n").encode()
+
+
+def generator_revision() -> str:
+    """Return the exact clean Git revision containing the running generator."""
+    head = subprocess.run(
+        git_command("rev-parse", "HEAD"),
+        cwd=REPOSITORY_ROOT,
+        env=git_environment(),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if len(head) != 40 or any(character not in "0123456789abcdef" for character in head):
+        raise RuntimeError("generator repository HEAD is not a full Git commit")
+    top_level = subprocess.run(
+        git_command("rev-parse", "--show-toplevel"),
+        cwd=REPOSITORY_ROOT,
+        env=git_environment(),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if Path(top_level).resolve() != REPOSITORY_ROOT:
+        raise RuntimeError("generator repository root is not the Git top level")
+    index_entries = subprocess.run(
+        git_command("ls-files", "-v", "-z"),
+        cwd=REPOSITORY_ROOT,
+        env=git_environment(),
+        check=True,
+        capture_output=True,
+    ).stdout.decode().split("\0")
+    flagged_paths = [entry for entry in index_entries if entry and not entry.startswith("H ")]
+    if flagged_paths:
+        raise RuntimeError(f"generator repository has non-normal index flags: {flagged_paths}")
+    script_path = Path(__file__).resolve()
+    script_relative = script_path.relative_to(REPOSITORY_ROOT).as_posix()
+    committed_script = subprocess.run(
+        git_command("show", f"{head}:{script_relative}"),
+        cwd=REPOSITORY_ROOT,
+        env=git_environment(),
+        check=True,
+        capture_output=True,
+    ).stdout
+    if script_path.read_bytes() != committed_script:
+        raise RuntimeError("running generator bytes do not match repository HEAD")
+    status = subprocess.run(
+        git_command("status", "--porcelain", "--untracked-files=all"),
+        cwd=REPOSITORY_ROOT,
+        env=git_environment(),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    if status:
+        raise RuntimeError("generator repository has changes; commit them before inference")
+    return head
+
+
+def source_timestamp_ns(frame_index: int, numerator: int, denominator: int) -> int:
+    scaled = frame_index * 1_000_000_000 * denominator
+    return (scaled + numerator // 2) // numerator
+
+
+def encode_mask(mask: np.ndarray) -> tuple[dict[str, Any], list[int]]:
+    encoded = mask_utils.encode(np.asfortranarray(mask.astype(np.uint8)))
+    counts = encoded["counts"]
+    if not isinstance(counts, bytes):
+        raise ValueError("pycocotools returned non-canonical mask counts")
+    x, y, width, height = (int(round(value)) for value in mask_utils.toBbox(encoded))
+    if width <= 0 or height <= 0:
+        raise ValueError("model returned an empty instance mask")
+    return (
+        {"size": [int(encoded["size"][0]), int(encoded["size"][1])], "counts": counts.decode("ascii")},
+        [x, y, x + width, y + height],
+    )
+
+
+def tracker_yaml(config: dict[str, Any], output: Path, reid_weights: Path) -> Path:
+    path = output / "tracktrack.yaml"
+    tracker = dict(config["tracker"])
+    tracker["model"] = str(reid_weights)
+    path.write_text(yaml.safe_dump(tracker, sort_keys=False))
+    return path
+
+
+def verified_sources(
+    dataset_root: Path, source_dir: Path, snapshot_root: Path
+) -> dict[str, Path]:
+    source_lock = load_json(dataset_root / "source-lock.json")
+    expected_names = {clip["filename"] for clip in source_lock["clips"]}
+    actual_names = {
+        path.name
+        for path in source_dir.iterdir()
+        if path.is_file() and path.suffix.lower() == ".mp4"
+    }
+    if actual_names != expected_names:
+        raise ValueError(
+            f"source MP4 inventory mismatch: expected {sorted(expected_names)}, found {sorted(actual_names)}"
+        )
+    snapshot_root.mkdir()
+    verified: dict[str, Path] = {}
+    for clip in source_lock["clips"]:
+        source = source_dir / clip["filename"]
+        snapshot = snapshot_root / clip["filename"]
+        shutil.copyfile(source, snapshot)
+        if sha256_file(snapshot) != clip["sha256"]:
+            raise ValueError(f"source hash mismatch: {source}")
+        verified[clip["id"]] = snapshot
+    return verified
+
+
+def frame_rows(
+    result: Any,
+    *,
+    clip_id: str,
+    frame_index: int,
+    source: dict[str, Any],
+    class_names: dict[int, str],
+    run_id: str,
+) -> list[dict[str, Any]]:
+    boxes = result.boxes
+    masks = result.masks
+    if not len(boxes) or boxes.id is None:
+        return []
+    if masks is None or len(masks.data) != len(boxes):
+        raise ValueError(f"{clip_id} frame {frame_index}: tracked boxes and masks do not align")
+    media = source["media"]
+    timestamp = source_timestamp_ns(frame_index, media["fps_numerator"], media["fps_denominator"])
+    rows: list[dict[str, Any]] = []
+    for index, (track_value, class_value, confidence_value) in enumerate(
+        zip(boxes.id.tolist(), boxes.cls.tolist(), boxes.conf.tolist(), strict=True)
+    ):
+        numeric_track_id = int(track_value)
+        numeric_class_id = int(class_value)
+        class_id = class_names.get(numeric_class_id)
+        if class_id is None:
+            raise ValueError(f"{clip_id} frame {frame_index}: unexpected class {numeric_class_id}")
+        mask = masks.data[index].detach().cpu().numpy() > 0.5
+        if mask.shape != (media["height"], media["width"]):
+            raise ValueError(
+                f"{clip_id} frame {frame_index}: model mask shape {mask.shape} does not match "
+                f"source shape {(media['height'], media['width'])}"
+            )
+        mask_rle, bbox = encode_mask(mask)
+        rows.append(
+            {
+                "schema_version": "cvbench.track-annotation/v1",
+                "clip_id": clip_id,
+                "frame_index": frame_index,
+                "source_timestamp_ns": timestamp,
+                "track_id": f"{class_id}-{numeric_track_id:04d}",
+                "class_id": class_id,
+                "bbox_xyxy": bbox,
+                "mask_rle": mask_rle,
+                "confidence": round(float(confidence_value), 6),
+                "occlusion": "unknown",
+                "truncated": (
+                    bbox[0] == 0
+                    or bbox[1] == 0
+                    or bbox[2] == media["width"]
+                    or bbox[3] == media["height"]
+                ),
+                "label_origin": {"kind": "model_generated", "model_run_ids": [run_id]},
+            }
+        )
+    return sorted(rows, key=lambda row: row["track_id"])
+
+
+def process_class(
+    model: YOLO,
+    *,
+    clip_id: str,
+    video: Path,
+    source: dict[str, Any],
+    config: dict[str, Any],
+    tracker_path: Path,
+    device: str,
+    numeric_class_id: int,
+    class_id: str,
+) -> list[dict[str, Any]]:
+    run_id = f"yolo26x-seg-tracktrack-{clip_id}"
+    inference = config["inference"]
+    rows: list[dict[str, Any]] = []
+    frame_count = 0
+    results = model.track(
+        source=str(video),
+        stream=True,
+        persist=False,
+        tracker=str(tracker_path),
+        device=device,
+        classes=[numeric_class_id],
+        conf=inference["confidence_threshold"],
+        iou=inference["iou_threshold"],
+        imgsz=inference["image_size"],
+        max_det=inference["maximum_detections"],
+        retina_masks=inference["retina_masks"],
+        vid_stride=inference["video_stride"],
+        save=False,
+        verbose=False,
+    )
+    for frame_index, result in enumerate(results):
+        rows.extend(
+            frame_rows(
+                result,
+                clip_id=clip_id,
+                frame_index=frame_index,
+                source=source,
+                class_names={numeric_class_id: class_id},
+                run_id=run_id,
+            )
+        )
+        frame_count += 1
+        if frame_count % 100 == 0:
+            print(
+                f"{clip_id} {class_id}: {frame_count}/{source['media']['frame_count']} frames",
+                flush=True,
+            )
+    if frame_count != source["media"]["frame_count"]:
+        raise ValueError(
+            f"{clip_id} {class_id}: processed {frame_count} frames, "
+            f"expected {source['media']['frame_count']}"
+        )
+    return rows
+
+
+def process_clip(
+    model: YOLO,
+    *,
+    dataset_root: Path,
+    clip_id: str,
+    video: Path,
+    output_root: Path,
+    config: dict[str, Any],
+    tracker_path: Path,
+    device: str,
+) -> dict[str, Any]:
+    source = load_json(dataset_root / "clips" / clip_id / "source.json")
+    class_names = {int(key): value for key, value in config["inference"]["classes"].items()}
+    rows = [
+        row
+        for numeric_class_id, class_id in class_names.items()
+        for row in process_class(
+            model,
+            clip_id=clip_id,
+            video=video,
+            source=source,
+            config=config,
+            tracker_path=tracker_path,
+            device=device,
+            numeric_class_id=numeric_class_id,
+            class_id=class_id,
+        )
+    ]
+    rows.sort(key=lambda row: (row["frame_index"], row["track_id"]))
+    clip_output = output_root / clip_id
+    clip_output.mkdir()
+    tracks = b"".join(canonical_json(row) for row in rows)
+    (clip_output / "tracks.jsonl").write_bytes(tracks)
+    summary = {
+        "clip_id": clip_id,
+        "frame_count": source["media"]["frame_count"],
+        "model_frames_processed": source["media"]["frame_count"] * len(class_names),
+        "annotation_rows": len(rows),
+        "track_count": len({row["track_id"] for row in rows}),
+        "tracks_sha256": hashlib.sha256(tracks).hexdigest(),
+    }
+    (clip_output / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(summary, sort_keys=True), flush=True)
+    return summary
+
+
+def updated_source(
+    source: dict[str, Any],
+    *,
+    clip_id: str,
+    config: dict[str, Any],
+    config_sha256: str,
+    weights_sha256: str,
+    raw_output_sha256: str,
+    generator_revision: str,
+    device: str,
+) -> dict[str, Any]:
+    run_id = f"yolo26x-seg-tracktrack-{clip_id}"
+    command = [
+        "uv",
+        "run",
+        "--frozen",
+        "--isolated",
+        "--all-extras",
+        "--no-editable",
+        "python",
+        "-I",
+        "-S",
+        "-X",
+        "pycache_prefix=/dev/null",
+        "scripts/generate_dense_tracks.py",
+        "--dataset-root",
+        f"datasets/{DATASET_ID}",
+        "--source-dir",
+        "<verified-originals>",
+        "--weights",
+        "<sha256-pinned-yolo26x-seg.pt>",
+        "--reid-weights",
+        "<sha256-pinned-yolo26n-cls.pt>",
+        "--config",
+        CONFIG_SOURCE,
+        "--output-dir",
+        "<new-ignored-output-directory>",
+        "--device",
+        device,
+        "--apply",
+    ]
+    source["model_runs"] = [
+        {
+            "run_id": run_id,
+            "model_name": f"{config['model']['name']} with {config['reid_model']['name']} ReID",
+            "model_version": (
+                f"{config['model']['version']} + {config['reid_model']['version']}"
+            ),
+            "weights_uri": config["model"]["weights_uri"],
+            "weights_sha256": weights_sha256,
+            "code_revision": generator_revision,
+            "config_sha256": config_sha256,
+            "config_file": CONFIG_ARTIFACT,
+            "raw_output_sha256": raw_output_sha256,
+            "command": command,
+            "license": config["model"]["license"],
+        }
+    ]
+    source["transformations"] = [
+        {
+            "kind": "dense_model_annotation",
+            "description": (
+                "Processed every native source frame for person and dog instances; media bytes are unchanged."
+            ),
+            "tool": f"scripts/generate_dense_tracks.py at {generator_revision}",
+            "config_sha256": config_sha256,
+            "config_file": CONFIG_ARTIFACT,
+        }
+    ]
+    return source
+
+
+def stage_dataset(
+    dataset_template: Path,
+    dataset_root: Path,
+    output_root: Path,
+    config: dict[str, Any],
+    config_bytes: bytes,
+    weights_sha256: str,
+    tracks_sha256_by_clip: dict[str, str],
+    generator_revision: str,
+    device: str,
+) -> Path:
+    stage_parent = Path(tempfile.mkdtemp(prefix="cvbench-dense-stage-", dir=dataset_root.parent))
+    stage = stage_parent / dataset_root.name
+    try:
+        shutil.copytree(dataset_template, stage)
+        config_sha256 = hashlib.sha256(config_bytes).hexdigest()
+
+        descriptor_path = stage / "dataset.yaml"
+        descriptor = yaml.safe_load(descriptor_path.read_text())
+        descriptor["version"] = "0.2.0"
+        descriptor["title"] = "Recovered clean videos dense segmentation tracks"
+        descriptor["description"] = (
+            "Five hash-pinned Pixabay and Pexels videos processed at native cadence with "
+            "YOLO26x-seg and TrackTrack appearance association. Dense model output is pending "
+            "human review and is not ground truth."
+        )
+        descriptor["ontology"]["classes"] = [
+            {"id": "person", "description": "Model-generated mask and track for a visible person."},
+            {"id": "dog", "description": "Model-generated mask and track for a visible dog."},
+        ]
+        descriptor_path.write_text(yaml.safe_dump(descriptor, sort_keys=False))
+
+        (stage / CONFIG_ARTIFACT).write_bytes(config_bytes)
+
+        for clip in descriptor["clips"]:
+            clip_id = clip["id"]
+            clip_root = stage / clip["path"]
+            generated_tracks = output_root / clip_id / "tracks.jsonl"
+            staged_tracks = clip_root / "tracks.jsonl"
+            shutil.copyfile(generated_tracks, staged_tracks)
+            tracks_sha256 = sha256_file(staged_tracks)
+            if tracks_sha256 != tracks_sha256_by_clip[clip_id]:
+                raise ValueError(f"{clip_id}: generated tracks changed before staging")
+            source_path = clip_root / "source.json"
+            source = updated_source(
+                load_json(source_path),
+                clip_id=clip_id,
+                config=config,
+                config_sha256=config_sha256,
+                weights_sha256=weights_sha256,
+                raw_output_sha256=tracks_sha256,
+                generator_revision=generator_revision,
+                device=device,
+            )
+            source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
+        validate_source_recipe(stage)
+        return stage
+    except BaseException:
+        shutil.rmtree(stage_parent)
+        raise
+
+
+def apply_stage(
+    dataset_root: Path, stage: Path, expected_previous_hashes: dict[str, str]
+) -> None:
+    flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+    lock_path = publication_lock_path(dataset_root)
+    descriptor = os.open(lock_path, flags, 0o600)
+    sync_directory(lock_path.parent)
+    with os.fdopen(descriptor, "r+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        recover_publication(lock, dataset_root)
+        if tree_hashes(dataset_root) != expected_previous_hashes:
+            raise RuntimeError("dataset changed during inference; refusing to overwrite it")
+        sync_tree(stage)
+        sync_directory(stage.parent)
+        intent = {
+            "schema_version": "cvbench.publication-intent/v1",
+            "phase": "prepared",
+            "dataset_root": str(dataset_root.resolve()),
+            "stage": str(stage.resolve()),
+            "previous_sha256": inventory_sha256(expected_previous_hashes),
+            "next_sha256": inventory_sha256(tree_hashes(stage)),
+        }
+        write_publication_intent(lock, intent)
+        blocked_signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked_signals)
+        try:
+            exchange_directories(dataset_root, stage)
+            sync_exchange_parents(dataset_root, stage)
+            intent["phase"] = "exchanged"
+            write_publication_intent(lock, intent)
+            if tree_hashes(stage) != expected_previous_hashes:
+                raise RuntimeError("dataset changed during inference; refusing to overwrite it")
+            validate_source_recipe(dataset_root)
+            intent["phase"] = "committed"
+            write_publication_intent(lock, intent)
+            shutil.rmtree(stage)
+            sync_directory(stage.parent)
+            write_publication_intent(lock, None)
+        except BaseException as publication_error:
+            publication_error.add_note(
+                f"publication recovery is recorded at {lock_path}; inspect {dataset_root} "
+                f"and {stage} if automatic recovery cannot reconcile them"
+            )
+            raise
+        finally:
+            restore_signal_mask(previous_mask)
+
+
+def exchange_directories(left: Path, right: Path) -> None:
+    """Atomically swap two existing directories on supported annotation hosts."""
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "linux":
+        try:
+            rename = library.renameat2
+        except AttributeError as exc:
+            raise RuntimeError("atomic dataset exchange is unsupported") from exc
+        result = rename(-100, os.fsencode(left), -100, os.fsencode(right), 2)  # RENAME_EXCHANGE
+    elif sys.platform == "darwin":
+        try:
+            rename = library.renamex_np
+        except AttributeError as exc:
+            raise RuntimeError("atomic dataset exchange is unsupported") from exc
+        result = rename(os.fsencode(left), os.fsencode(right), 2)  # RENAME_SWAP
+    else:
+        raise RuntimeError("atomic dataset exchange requires macOS or Linux")
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, f"atomic dataset exchange failed: {left} <-> {right}")
+
+
+def verify_pinned_weights(
+    config: dict[str, Any], weights_path: Path, reid_weights_path: Path
+) -> tuple[str, str]:
+    weights_sha256 = sha256_file(weights_path)
+    if weights_sha256 != config["model"]["weights_sha256"]:
+        raise ValueError("detector weights do not match the pinned config hash")
+    reid_weights_sha256 = sha256_file(reid_weights_path)
+    if reid_weights_sha256 != config["reid_model"]["weights_sha256"]:
+        raise ValueError("ReID weights do not match the pinned config hash")
+    return weights_sha256, reid_weights_sha256
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset-root", type=Path, required=True)
+    parser.add_argument("--source-dir", type=Path, required=True)
+    parser.add_argument("--weights", type=Path, required=True)
+    parser.add_argument("--reid-weights", type=Path, required=True)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=REPOSITORY_ROOT / CONFIG_SOURCE,
+    )
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--device", default="mps")
+    parser.add_argument("--apply", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> None:
+    if not sys.flags.isolated or not sys.flags.no_site:
+        raise RuntimeError("run the dense-track generator with `python -I -S`")
+    require_locked_environment()
+    require_locked_project_install()
+    args = parse_args()
+    dataset_root = args.dataset_root.resolve()
+    source_dir = args.source_dir.resolve()
+    weights = args.weights.resolve()
+    reid_weights = args.reid_weights.resolve()
+    config_path = args.config.resolve()
+    output_root = args.output_dir.resolve()
+    if output_root == dataset_root or dataset_root in output_root.parents:
+        raise ValueError("output directory must be outside dataset root")
+    if output_root.exists():
+        raise FileExistsError(f"output already exists: {output_root}")
+    if not weights.is_file():
+        raise FileNotFoundError(weights)
+    if not reid_weights.is_file():
+        raise FileNotFoundError(reid_weights)
+    if ultralytics_version != "8.4.120":
+        raise RuntimeError(f"expected ultralytics 8.4.120, found {ultralytics_version}")
+    revision = generator_revision()
+    config = load_json(config_path)
+    config_bytes = canonical_json(config)
+    supported_config = json.loads(
+        subprocess.run(
+            git_command("show", f"{revision}:{CONFIG_SOURCE}"),
+            cwd=REPOSITORY_ROOT,
+            env=git_environment(),
+            check=True,
+            capture_output=True,
+        ).stdout
+    )
+    if not isinstance(supported_config, dict) or config_bytes != canonical_json(supported_config):
+        raise ValueError("generator config must match the canonical config at repository HEAD")
+    verify_locked_artifacts(config, revision)
+    output_root.mkdir(parents=True)
+    recipe_snapshot = output_root / "source-recipe"
+    source_snapshot = output_root / "verified-sources"
+    weights_snapshot = output_root / "verified-weights"
+    try:
+        weights_snapshot.mkdir()
+        detector_snapshot = weights_snapshot / "detector.pt"
+        reid_snapshot = weights_snapshot / "reid.pt"
+        shutil.copyfile(weights, detector_snapshot)
+        shutil.copyfile(reid_weights, reid_snapshot)
+        weights_sha256, reid_weights_sha256 = verify_pinned_weights(
+            config, detector_snapshot, reid_snapshot
+        )
+        shutil.copytree(dataset_root, recipe_snapshot)
+        report = validate_source_recipe(recipe_snapshot)
+        if report.id != DATASET_ID:
+            raise ValueError(f"this generator only accepts {DATASET_ID}")
+        expected_previous_hashes = tree_hashes(recipe_snapshot)
+        sources = verified_sources(recipe_snapshot, source_dir, source_snapshot)
+        tracker_path = tracker_yaml(config, output_root, reid_snapshot)
+        model = YOLO(str(detector_snapshot))
+        summaries = [
+            process_clip(
+                model,
+                dataset_root=recipe_snapshot,
+                clip_id=clip_id,
+                video=video,
+                output_root=output_root,
+                config=config,
+                tracker_path=tracker_path,
+                device=args.device,
+            )
+            for clip_id, video in sources.items()
+        ]
+        manifest = {
+            "schema_version": "cvbench.dense-tracking-run/v1",
+            "generator_revision": revision,
+            "weights_sha256": weights_sha256,
+            "reid_weights_sha256": reid_weights_sha256,
+            "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+            "clips": summaries,
+        }
+        (output_root / "run.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        if args.apply:
+            verify_pinned_weights(config, detector_snapshot, reid_snapshot)
+            verify_locked_artifacts(config, revision)
+            stage = stage_dataset(
+                recipe_snapshot,
+                dataset_root,
+                output_root,
+                config,
+                config_bytes,
+                weights_sha256,
+                {summary["clip_id"]: summary["tracks_sha256"] for summary in summaries},
+                revision,
+                args.device,
+            )
+            verify_locked_artifacts(config, revision)
+            apply_stage(dataset_root, stage, expected_previous_hashes)
+            shutil.rmtree(stage.parent)
+    finally:
+        shutil.rmtree(source_snapshot, ignore_errors=True)
+        shutil.rmtree(recipe_snapshot, ignore_errors=True)
+        shutil.rmtree(weights_snapshot, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    require_locked_environment()
+    bootstrap_revision = generator_revision()
+    bootstrap_config = load_json(REPOSITORY_ROOT / CONFIG_SOURCE)
+    committed_config = json.loads(
+        subprocess.run(
+            git_command("show", f"{bootstrap_revision}:{CONFIG_SOURCE}"),
+            cwd=REPOSITORY_ROOT,
+            env=git_environment(),
+            check=True,
+            capture_output=True,
+        ).stdout
+    )
+    if (
+        not isinstance(committed_config, dict)
+        or canonical_json(bootstrap_config) != canonical_json(committed_config)
+    ):
+        raise RuntimeError("canonical generator config does not match repository HEAD")
+    verify_locked_artifacts(bootstrap_config, bootstrap_revision)
+    activate_locked_site_packages()
+    load_dependencies()
+    main()
+else:
+    load_dependencies()

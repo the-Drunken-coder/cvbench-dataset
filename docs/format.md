@@ -60,6 +60,12 @@ Boxes use `[x_min, y_min, x_max, y_max]` in source pixels. Rows are uniquely
 sorted by `(frame_index, track_id)`. Frame timestamps must be consistent and
 strictly increase.
 
+Rows may also carry a source-resolution instance mask as compact COCO RLE in
+`mask_rle`. Its `size` is `[height, width]`; `counts` is the canonical COCO
+ASCII encoding over column-major pixels. The validator decodes every mask,
+requires complete image coverage, rejects empty foreground, and requires
+`bbox_xyxy` to equal the mask's integer bounds.
+
 ## Reviews
 
 A review event binds its decision to the SHA-256 of `video.mp4`,

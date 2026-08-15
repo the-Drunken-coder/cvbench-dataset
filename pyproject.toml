@@ -20,6 +20,11 @@ dev = [
   "pytest>=8,<9",
   "ruff>=0.12,<1",
 ]
+annotation = [
+  "lap==0.5.12",
+  "pycocotools==2.0.11",
+  "ultralytics==8.4.120",
+]
 
 [project.scripts]
 cvbench-dataset = "cvbench_dataset.cli:main"
