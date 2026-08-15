@@ -460,6 +460,8 @@ def stage_dataset(
 def apply_stage(
     dataset_root: Path, stage: Path, expected_previous_hashes: dict[str, str]
 ) -> None:
+    if tree_hashes(dataset_root) != expected_previous_hashes:
+        raise RuntimeError("dataset changed during inference; refusing to overwrite it")
     exchange_directories(dataset_root, stage)
     try:
         if tree_hashes(stage) != expected_previous_hashes:
@@ -545,6 +547,8 @@ def main() -> None:
     inference_config = config.get("inference")
     if not isinstance(inference_config, dict) or inference_config.get("class_isolated_passes") is not True:
         raise ValueError("generator requires inference.class_isolated_passes to be true")
+    if inference_config.get("classes") != {"0": "person", "16": "dog"}:
+        raise ValueError("generator requires inference.classes to map 0 to person and 16 to dog")
     config_bytes = canonical_json(config)
     output_root.mkdir(parents=True)
     recipe_snapshot = output_root / "source-recipe"
