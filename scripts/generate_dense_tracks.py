@@ -89,6 +89,25 @@ def generator_revision() -> str:
     ).stdout.strip()
     if Path(top_level).resolve() != REPOSITORY_ROOT:
         raise RuntimeError("generator repository root is not the Git top level")
+    index_entries = subprocess.run(
+        ["git", "ls-files", "-v", "-z"],
+        cwd=REPOSITORY_ROOT,
+        check=True,
+        capture_output=True,
+    ).stdout.decode().split("\0")
+    flagged_paths = [entry for entry in index_entries if entry and not entry.startswith("H ")]
+    if flagged_paths:
+        raise RuntimeError(f"generator repository has non-normal index flags: {flagged_paths}")
+    script_path = Path(__file__).resolve()
+    script_relative = script_path.relative_to(REPOSITORY_ROOT).as_posix()
+    committed_script = subprocess.run(
+        ["git", "show", f"{head}:{script_relative}"],
+        cwd=REPOSITORY_ROOT,
+        check=True,
+        capture_output=True,
+    ).stdout
+    if script_path.read_bytes() != committed_script:
+        raise RuntimeError("running generator bytes do not match repository HEAD")
     status = subprocess.run(
         ["git", "status", "--porcelain", "--untracked-files=all"],
         cwd=REPOSITORY_ROOT,
