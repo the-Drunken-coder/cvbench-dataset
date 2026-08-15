@@ -3,15 +3,20 @@
 
 from __future__ import annotations
 
+import sys
+
+# This generator has no sibling imports. Remove its directory before loading dependencies so
+# ignored or untracked files beside the script cannot shadow the standard library or packages.
+if sys.path:
+    sys.path.pop(0)
+
 import argparse
 import ctypes
 import hashlib
-import importlib.machinery
 import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -37,6 +42,17 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def tree_hashes(root: Path) -> dict[str, str]:
+    """Hash every regular file in a source recipe, rejecting links."""
+    hashes: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"source recipe cannot contain symlinks: {path}")
+        if path.is_file():
+            hashes[path.relative_to(root).as_posix()] = sha256_file(path)
+    return hashes
+
+
 def load_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text())
     if not isinstance(value, dict):
@@ -59,35 +75,6 @@ def generator_revision() -> str:
     ).stdout.strip()
     if len(head) != 40 or any(character not in "0123456789abcdef" for character in head):
         raise RuntimeError("generator repository HEAD is not a full Git commit")
-    tracked = {
-        path
-        for path in subprocess.run(
-            ["git", "ls-files", "-z"],
-            cwd=REPOSITORY_ROOT,
-            check=True,
-            capture_output=True,
-        ).stdout.decode().split("\0")
-        if path
-    }
-    script_root = Path(__file__).resolve().parent
-    import_suffixes = importlib.machinery.all_suffixes()
-    import_candidates: list[Path] = []
-    for child in script_root.iterdir():
-        if child.is_file() and any(child.name.endswith(suffix) for suffix in import_suffixes):
-            import_candidates.append(child)
-        elif child.is_dir():
-            import_candidates.extend(
-                package_init
-                for suffix in import_suffixes
-                if (package_init := child / f"__init__{suffix}").is_file()
-            )
-    untracked_imports = sorted(
-        path.relative_to(REPOSITORY_ROOT).as_posix()
-        for path in import_candidates
-        if path.relative_to(REPOSITORY_ROOT).as_posix() not in tracked
-    )
-    if untracked_imports:
-        raise RuntimeError(f"generator import path contains untracked modules: {untracked_imports}")
     status = subprocess.run(
         ["git", "status", "--porcelain", "--untracked-files=all"],
         cwd=REPOSITORY_ROOT,
@@ -377,6 +364,7 @@ def updated_source(
 
 
 def stage_dataset(
+    dataset_template: Path,
     dataset_root: Path,
     output_root: Path,
     config: dict[str, Any],
@@ -390,7 +378,7 @@ def stage_dataset(
     stage_parent = Path(tempfile.mkdtemp(prefix="cvbench-dense-stage-", dir=dataset_root.parent))
     stage = stage_parent / dataset_root.name
     try:
-        shutil.copytree(dataset_root, stage)
+        shutil.copytree(dataset_template, stage)
         config_sha256 = hashlib.sha256(config_bytes).hexdigest()
 
         descriptor_path = stage / "dataset.yaml"
@@ -439,9 +427,13 @@ def stage_dataset(
         raise
 
 
-def apply_stage(dataset_root: Path, stage: Path) -> None:
+def apply_stage(
+    dataset_root: Path, stage: Path, expected_previous_hashes: dict[str, str]
+) -> None:
     exchange_directories(dataset_root, stage)
     try:
+        if tree_hashes(stage) != expected_previous_hashes:
+            raise RuntimeError("dataset changed during inference; refusing to overwrite it")
         validate_source_recipe(dataset_root)
     except BaseException:
         exchange_directories(dataset_root, stage)
@@ -516,23 +508,26 @@ def main() -> None:
         raise FileNotFoundError(reid_weights)
     if ultralytics_version != "8.4.120":
         raise RuntimeError(f"expected ultralytics 8.4.120, found {ultralytics_version}")
-    report = validate_source_recipe(dataset_root)
-    if report.id != DATASET_ID:
-        raise ValueError(f"this generator only accepts {DATASET_ID}")
     revision = generator_revision()
     config = load_json(config_path)
     config_bytes = canonical_json(config)
     weights_sha256, reid_weights_sha256 = verify_pinned_weights(config, weights, reid_weights)
     output_root.mkdir(parents=True)
-    snapshot_root = output_root / "verified-sources"
+    recipe_snapshot = output_root / "source-recipe"
+    source_snapshot = output_root / "verified-sources"
     try:
-        sources = verified_sources(dataset_root, source_dir, snapshot_root)
+        shutil.copytree(dataset_root, recipe_snapshot)
+        report = validate_source_recipe(recipe_snapshot)
+        if report.id != DATASET_ID:
+            raise ValueError(f"this generator only accepts {DATASET_ID}")
+        expected_previous_hashes = tree_hashes(recipe_snapshot)
+        sources = verified_sources(recipe_snapshot, source_dir, source_snapshot)
         tracker_path = tracker_yaml(config, output_root, reid_weights)
         model = YOLO(str(weights))
         summaries = [
             process_clip(
                 model,
-                dataset_root=dataset_root,
+                dataset_root=recipe_snapshot,
                 clip_id=clip_id,
                 video=video,
                 output_root=output_root,
@@ -542,32 +537,34 @@ def main() -> None:
             )
             for clip_id, video in sources.items()
         ]
+        manifest = {
+            "schema_version": "cvbench.dense-tracking-run/v1",
+            "generator_revision": revision,
+            "weights_sha256": weights_sha256,
+            "reid_weights_sha256": reid_weights_sha256,
+            "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+            "clips": summaries,
+        }
+        (output_root / "run.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        if args.apply:
+            verify_pinned_weights(config, weights, reid_weights)
+            stage = stage_dataset(
+                recipe_snapshot,
+                dataset_root,
+                output_root,
+                config,
+                config_bytes,
+                weights_sha256,
+                {summary["clip_id"]: summary["tracks_sha256"] for summary in summaries},
+                revision,
+                args.config,
+                args.device,
+            )
+            apply_stage(dataset_root, stage, expected_previous_hashes)
+            shutil.rmtree(stage.parent)
     finally:
-        shutil.rmtree(snapshot_root, ignore_errors=True)
-    manifest = {
-        "schema_version": "cvbench.dense-tracking-run/v1",
-        "generator_revision": revision,
-        "weights_sha256": weights_sha256,
-        "reid_weights_sha256": reid_weights_sha256,
-        "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
-        "clips": summaries,
-    }
-    (output_root / "run.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    if args.apply:
-        verify_pinned_weights(config, weights, reid_weights)
-        stage = stage_dataset(
-            dataset_root,
-            output_root,
-            config,
-            config_bytes,
-            weights_sha256,
-            {summary["clip_id"]: summary["tracks_sha256"] for summary in summaries},
-            revision,
-            args.config,
-            args.device,
-        )
-        apply_stage(dataset_root, stage)
-        shutil.rmtree(stage.parent)
+        shutil.rmtree(source_snapshot, ignore_errors=True)
+        shutil.rmtree(recipe_snapshot, ignore_errors=True)
 
 
 if __name__ == "__main__":
