@@ -146,6 +146,32 @@ def site_packages_fingerprint() -> str:
     return digest.hexdigest()
 
 
+def python_runtime_fingerprint() -> str:
+    executable = Path(sys.executable).resolve()
+    stdlib = Path(sysconfig.get_paths()["stdlib"]).resolve()
+    digest = hashlib.sha256()
+    digest.update(b"executable\0")
+    digest.update(bytes.fromhex(sha256_file(executable)))
+    for path in sorted(stdlib.rglob("*")):
+        relative = path.relative_to(stdlib)
+        if path.is_symlink():
+            raise RuntimeError(f"Python runtime contains a symlink: {relative}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise RuntimeError(f"Python runtime contains an unsupported entry: {relative}")
+        if (
+            "site-packages" in relative.parts
+            or "__pycache__" in relative.parts
+            or path.suffix in {".pyc", ".pyo"}
+        ):
+            continue
+        digest.update(relative.as_posix().encode())
+        digest.update(b"\0")
+        digest.update(bytes.fromhex(sha256_file(path)))
+    return digest.hexdigest()
+
+
 def verify_project_install(revision: str) -> None:
     package_root = Path(validate_source_recipe.__code__.co_filename).resolve().parent
     prefix = Path(sys.prefix).resolve()
@@ -185,6 +211,7 @@ def verify_locked_artifacts(config: dict[str, Any], revision: str) -> None:
         "python_version": platform.python_version(),
         "platform": sysconfig.get_platform(),
         "uv_lock_sha256": sha256_file(REPOSITORY_ROOT / "uv.lock"),
+        "python_runtime_sha256": python_runtime_fingerprint(),
         "site_packages_sha256": site_packages_fingerprint(),
     }
     if actual != expected:
@@ -718,7 +745,9 @@ def apply_stage(
     dataset_root: Path, stage: Path, expected_previous_hashes: dict[str, str]
 ) -> None:
     flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
-    descriptor = os.open(publication_lock_path(dataset_root), flags, 0o600)
+    lock_path = publication_lock_path(dataset_root)
+    descriptor = os.open(lock_path, flags, 0o600)
+    sync_directory(lock_path.parent)
     with os.fdopen(descriptor, "r+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         recover_publication(lock, dataset_root)
@@ -906,6 +935,7 @@ def main() -> None:
         (output_root / "run.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         if args.apply:
             verify_pinned_weights(config, detector_snapshot, reid_snapshot)
+            verify_locked_artifacts(config, revision)
             stage = stage_dataset(
                 recipe_snapshot,
                 dataset_root,
@@ -917,6 +947,7 @@ def main() -> None:
                 revision,
                 args.device,
             )
+            verify_locked_artifacts(config, revision)
             apply_stage(dataset_root, stage, expected_previous_hashes)
             shutil.rmtree(stage.parent)
     finally:

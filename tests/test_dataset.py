@@ -1797,6 +1797,26 @@ def test_dense_generator_fingerprint_binds_installed_bytes(
     assert dense_generator.site_packages_fingerprint() != original
 
 
+def test_dense_generator_fingerprint_binds_python_runtime_bytes(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "python"
+    stdlib = tmp_path / "stdlib"
+    stdlib.mkdir()
+    executable.write_bytes(b"python-runtime")
+    module = stdlib / "module.py"
+    module.write_text("VALUE = 1\n")
+    monkeypatch.setattr(dense_generator.sys, "executable", str(executable))
+    monkeypatch.setattr(
+        dense_generator.sysconfig, "get_paths", lambda: {"stdlib": str(stdlib)}
+    )
+
+    original = dense_generator.python_runtime_fingerprint()
+    module.write_text("VALUE = 2\n")
+
+    assert dense_generator.python_runtime_fingerprint() != original
+
+
 def test_dense_generator_replay_uses_config_from_recorded_revision(
     dense_generator: ModuleType,
 ) -> None:
@@ -1867,6 +1887,7 @@ def test_dense_publication_commits_exchange_before_removing_old_tree(
     dense_generator.apply_stage(dataset, stage, expected)
 
     assert events == [
+        ("sync-directory", tmp_path),
         ("sync-tree", stage),
         ("sync-directory", stage_parent),
         ("exchange", (dataset, stage)),
