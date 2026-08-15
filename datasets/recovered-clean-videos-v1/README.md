@@ -20,6 +20,12 @@ ReID, tracker, and threshold settings are hash-bound through
 revision are pinned in provenance. None of that turns the output into
 human-reviewed labels.
 
+The frozen run artifact preserves the exact configuration bytes used during
+inference. Its `reid_model.name` says COCO, which was a display-label error:
+`yolo26n-cls.pt` is ImageNet-pretrained. The corrected model name appears in
+each clip's source provenance and in the current generator configuration
+without rewriting the historical run artifact or its binding hash.
+
 ## Obtain and hydrate the media
 
 Download the exact filenames from the source URLs in each `source.json`, then

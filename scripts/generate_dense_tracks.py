@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -379,25 +381,35 @@ def stage_dataset(
 
 
 def apply_stage(dataset_root: Path, stage: Path) -> None:
-    backup_parent = Path(tempfile.mkdtemp(prefix="cvbench-dense-backup-", dir=dataset_root.parent))
-    backup = backup_parent / dataset_root.name
+    exchange_directories(dataset_root, stage)
     try:
-        os.replace(dataset_root, backup)
+        validate_source_recipe(dataset_root)
     except BaseException:
-        backup_parent.rmdir()
+        exchange_directories(dataset_root, stage)
         raise
-    try:
-        os.replace(stage, dataset_root)
+    shutil.rmtree(stage)
+
+
+def exchange_directories(left: Path, right: Path) -> None:
+    """Atomically swap two existing directories on supported annotation hosts."""
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "linux":
         try:
-            validate_source_recipe(dataset_root)
-        except BaseException:
-            os.replace(dataset_root, stage)
-            raise
-    except BaseException:
-        os.replace(backup, dataset_root)
-        backup_parent.rmdir()
-        raise
-    shutil.rmtree(backup_parent)
+            rename = library.renameat2
+        except AttributeError as exc:
+            raise RuntimeError("atomic dataset exchange is unsupported") from exc
+        result = rename(-100, os.fsencode(left), -100, os.fsencode(right), 2)  # RENAME_EXCHANGE
+    elif sys.platform == "darwin":
+        try:
+            rename = library.renamex_np
+        except AttributeError as exc:
+            raise RuntimeError("atomic dataset exchange is unsupported") from exc
+        result = rename(os.fsencode(left), os.fsencode(right), 2)  # RENAME_SWAP
+    else:
+        raise RuntimeError("atomic dataset exchange requires macOS or Linux")
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, f"atomic dataset exchange failed: {left} <-> {right}")
 
 
 def verify_pinned_weights(
