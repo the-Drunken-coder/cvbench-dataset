@@ -309,7 +309,6 @@ def updated_source(
     weights_sha256: str,
     raw_output_sha256: str,
     generator_revision: str,
-    config_argument: Path,
     device: str,
 ) -> dict[str, Any]:
     run_id = f"yolo26x-seg-tracktrack-{clip_id}"
@@ -325,7 +324,7 @@ def updated_source(
         "--reid-weights",
         "<sha256-pinned-yolo26n-cls.pt>",
         "--config",
-        str(config_argument),
+        f"datasets/{DATASET_ID}/{CONFIG_ARTIFACT}",
         "--output-dir",
         "<new-ignored-output-directory>",
         "--device",
@@ -372,7 +371,6 @@ def stage_dataset(
     weights_sha256: str,
     tracks_sha256_by_clip: dict[str, str],
     generator_revision: str,
-    config_argument: Path,
     device: str,
 ) -> Path:
     stage_parent = Path(tempfile.mkdtemp(prefix="cvbench-dense-stage-", dir=dataset_root.parent))
@@ -416,7 +414,6 @@ def stage_dataset(
                 weights_sha256=weights_sha256,
                 raw_output_sha256=tracks_sha256,
                 generator_revision=generator_revision,
-                config_argument=config_argument,
                 device=device,
             )
             source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
@@ -513,19 +510,27 @@ def main() -> None:
     revision = generator_revision()
     config = load_json(config_path)
     config_bytes = canonical_json(config)
-    weights_sha256, reid_weights_sha256 = verify_pinned_weights(config, weights, reid_weights)
     output_root.mkdir(parents=True)
     recipe_snapshot = output_root / "source-recipe"
     source_snapshot = output_root / "verified-sources"
+    weights_snapshot = output_root / "verified-weights"
     try:
+        weights_snapshot.mkdir()
+        detector_snapshot = weights_snapshot / "detector.pt"
+        reid_snapshot = weights_snapshot / "reid.pt"
+        shutil.copyfile(weights, detector_snapshot)
+        shutil.copyfile(reid_weights, reid_snapshot)
+        weights_sha256, reid_weights_sha256 = verify_pinned_weights(
+            config, detector_snapshot, reid_snapshot
+        )
         shutil.copytree(dataset_root, recipe_snapshot)
         report = validate_source_recipe(recipe_snapshot)
         if report.id != DATASET_ID:
             raise ValueError(f"this generator only accepts {DATASET_ID}")
         expected_previous_hashes = tree_hashes(recipe_snapshot)
         sources = verified_sources(recipe_snapshot, source_dir, source_snapshot)
-        tracker_path = tracker_yaml(config, output_root, reid_weights)
-        model = YOLO(str(weights))
+        tracker_path = tracker_yaml(config, output_root, reid_snapshot)
+        model = YOLO(str(detector_snapshot))
         summaries = [
             process_clip(
                 model,
@@ -549,7 +554,7 @@ def main() -> None:
         }
         (output_root / "run.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         if args.apply:
-            verify_pinned_weights(config, weights, reid_weights)
+            verify_pinned_weights(config, detector_snapshot, reid_snapshot)
             stage = stage_dataset(
                 recipe_snapshot,
                 dataset_root,
@@ -559,7 +564,6 @@ def main() -> None:
                 weights_sha256,
                 {summary["clip_id"]: summary["tracks_sha256"] for summary in summaries},
                 revision,
-                args.config,
                 args.device,
             )
             apply_stage(dataset_root, stage, expected_previous_hashes)
@@ -567,6 +571,7 @@ def main() -> None:
     finally:
         shutil.rmtree(source_snapshot, ignore_errors=True)
         shutil.rmtree(recipe_snapshot, ignore_errors=True)
+        shutil.rmtree(weights_snapshot, ignore_errors=True)
 
 
 if __name__ == "__main__":
