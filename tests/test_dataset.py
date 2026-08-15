@@ -1759,13 +1759,20 @@ def test_dense_generator_uses_owned_lock_and_disables_git_replacements(
         "show",
         "HEAD:file",
     ]
-    assert not any(key.startswith("GIT_") for key in dense_generator.git_environment())
+    git_environment = dense_generator.git_environment()
+    assert {key for key in git_environment if key.startswith("GIT_")} == {
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_SYSTEM",
+    }
+    if not Path("/usr/bin/git").exists():
+        pytest.skip("the pinned git executable is not present on this host")
     assert (
         subprocess.run(
             ["/usr/bin/git", "check-ignore", "--quiet", "datasets/.sample.publication.lock"],
             cwd=ROOT,
             check=False,
-            env=dense_generator.git_environment(),
+            env=git_environment,
         ).returncode
         == 0
     )
@@ -1878,29 +1885,73 @@ def test_dense_publication_rolls_back_interrupt_after_exchange(
     dataset.mkdir()
     stage.mkdir(parents=True)
     expected = {"dataset.yaml": "file:hash"}
-    exchanges = 0
+    exchanges: list[tuple[Path, ...]] = []
+    parent_syncs = 0
+    blocked: set[signal.Signals] = set()
 
-    def exchange(*_: Path) -> None:
-        nonlocal exchanges
-        exchanges += 1
+    def exchange(*paths: Path) -> None:
+        exchanges.append(paths)
 
-    def interrupt_on_unblock(operation: int, _: set[signal.Signals]) -> set[signal.Signals]:
+    def record_mask(
+        operation: int, signals: set[signal.Signals]
+    ) -> set[signal.Signals]:
         if operation == signal.SIG_BLOCK:
+            blocked.update(signals)
             return set()
-        raise KeyboardInterrupt
+        return set()
+
+    def interrupt_after_exchange(*_: Path) -> None:
+        nonlocal parent_syncs
+        parent_syncs += 1
+        if parent_syncs == 1:
+            raise KeyboardInterrupt
 
     monkeypatch.setattr(dense_generator, "publication_lock_path", lambda _: tmp_path / "lock")
     monkeypatch.setattr(dense_generator, "tree_hashes", lambda _: expected)
     monkeypatch.setattr(dense_generator, "sync_tree", lambda _: None)
     monkeypatch.setattr(dense_generator, "sync_directory", lambda _: None)
-    monkeypatch.setattr(dense_generator, "sync_exchange_parents", lambda *_: None)
+    monkeypatch.setattr(dense_generator, "sync_exchange_parents", interrupt_after_exchange)
     monkeypatch.setattr(dense_generator, "exchange_directories", exchange)
-    monkeypatch.setattr(dense_generator.signal, "pthread_sigmask", interrupt_on_unblock)
+    monkeypatch.setattr(dense_generator.signal, "pthread_sigmask", record_mask)
 
     with pytest.raises(KeyboardInterrupt):
         dense_generator.apply_stage(dataset, stage, expected)
 
-    assert exchanges == 2
+    assert blocked == {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+    assert exchanges == [(dataset, stage), (dataset, stage)]
+
+
+def test_dense_publication_recovers_durable_unfinished_exchange(
+    dense_generator: ModuleType, tmp_path: Path
+) -> None:
+    dataset = tmp_path / "dataset"
+    stage = tmp_path / "stage-parent" / "dataset"
+    dataset.mkdir()
+    stage.mkdir(parents=True)
+    (dataset / "state.txt").write_text("previous\n")
+    (stage / "state.txt").write_text("next\n")
+    intent = {
+        "schema_version": "cvbench.publication-intent/v1",
+        "phase": "exchanged",
+        "dataset_root": str(dataset.resolve()),
+        "stage": str(stage.resolve()),
+        "previous_sha256": dense_generator.inventory_sha256(
+            dense_generator.tree_hashes(dataset)
+        ),
+        "next_sha256": dense_generator.inventory_sha256(dense_generator.tree_hashes(stage)),
+    }
+    lock_path = tmp_path / "publication.lock"
+
+    with lock_path.open("w+b") as lock:
+        dense_generator.write_publication_intent(lock, intent)
+        dense_generator.exchange_directories(dataset, stage)
+        dense_generator.sync_exchange_parents(dataset, stage)
+        dense_generator.recover_publication(lock, dataset)
+        lock.seek(0)
+        assert lock.read() == b""
+
+    assert (dataset / "state.txt").read_text() == "previous\n"
+    assert not stage.exists()
 
 
 def test_dense_publication_durably_rolls_back_failed_validation(

@@ -106,7 +106,15 @@ def git_command(*arguments: str) -> list[str]:
 
 
 def git_environment() -> dict[str, str]:
-    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+    )
+    return environment
 
 
 def site_packages_fingerprint() -> str:
@@ -218,6 +226,79 @@ def sync_tree(root: Path) -> None:
 def sync_exchange_parents(left: Path, right: Path) -> None:
     for parent in {left.parent, right.parent}:
         sync_directory(parent)
+
+
+def inventory_sha256(hashes: dict[str, str]) -> str:
+    return hashlib.sha256(canonical_json(hashes)).hexdigest()
+
+
+def write_publication_intent(lock: Any, intent: dict[str, Any] | None) -> None:
+    contents = b"" if intent is None else canonical_json(intent)
+    lock.seek(0)
+    lock.truncate()
+    lock.write(contents)
+    lock.flush()
+    os.fsync(lock.fileno())
+
+
+def recover_publication(lock: Any, dataset_root: Path) -> None:
+    lock.seek(0)
+    contents = lock.read()
+    if not contents:
+        return
+    intent = json.loads(contents)
+    if not isinstance(intent, dict):
+        raise RuntimeError("publication intent is not a JSON object")
+    expected_keys = {
+        "schema_version",
+        "phase",
+        "dataset_root",
+        "stage",
+        "previous_sha256",
+        "next_sha256",
+    }
+    if set(intent) != expected_keys or intent["schema_version"] != "cvbench.publication-intent/v1":
+        raise RuntimeError("publication intent has an unsupported shape")
+    resolved_root = dataset_root.resolve()
+    stage = Path(intent["stage"]).resolve()
+    if (
+        intent["dataset_root"] != str(resolved_root)
+        or stage.name != resolved_root.name
+        or stage.parent.parent != resolved_root.parent
+    ):
+        raise RuntimeError("publication intent targets unexpected paths")
+    phase = intent["phase"]
+    if phase not in {"prepared", "exchanged", "committed"}:
+        raise RuntimeError("publication intent has an unsupported phase")
+    root_sha256 = inventory_sha256(tree_hashes(resolved_root))
+    stage_sha256 = inventory_sha256(tree_hashes(stage)) if stage.is_dir() else None
+    previous_sha256 = intent["previous_sha256"]
+    next_sha256 = intent["next_sha256"]
+    if phase == "committed":
+        if root_sha256 != next_sha256 or stage_sha256 not in {None, previous_sha256}:
+            raise RuntimeError("committed publication intent does not match the filesystem")
+    elif root_sha256 == next_sha256 and stage_sha256 == previous_sha256:
+        exchange_directories(resolved_root, stage)
+        sync_exchange_parents(resolved_root, stage)
+        stage_sha256 = next_sha256
+    elif root_sha256 != previous_sha256 or stage_sha256 != next_sha256:
+        raise RuntimeError("unfinished publication intent does not match the filesystem")
+    write_publication_intent(lock, None)
+    if stage_sha256 is not None:
+        shutil.rmtree(stage)
+        sync_directory(stage.parent)
+
+
+def restore_signal_mask(previous_mask: set[signal.Signals]) -> None:
+    try:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    except BaseException as restoration_error:
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        except BaseException as retry_error:
+            retry_error.add_note(f"initial signal-mask restoration failed: {restoration_error!r}")
+            raise
+        raise
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -640,37 +721,56 @@ def apply_stage(
     descriptor = os.open(publication_lock_path(dataset_root), flags, 0o600)
     with os.fdopen(descriptor, "r+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        recover_publication(lock, dataset_root)
         if tree_hashes(dataset_root) != expected_previous_hashes:
             raise RuntimeError("dataset changed during inference; refusing to overwrite it")
         sync_tree(stage)
         sync_directory(stage.parent)
+        intent = {
+            "schema_version": "cvbench.publication-intent/v1",
+            "phase": "prepared",
+            "dataset_root": str(dataset_root.resolve()),
+            "stage": str(stage.resolve()),
+            "previous_sha256": inventory_sha256(expected_previous_hashes),
+            "next_sha256": inventory_sha256(tree_hashes(stage)),
+        }
+        write_publication_intent(lock, intent)
+        blocked_signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked_signals)
         exchanged = False
+        committed = False
         try:
-            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
-            try:
-                exchange_directories(dataset_root, stage)
-                exchanged = True
-            finally:
-                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            exchange_directories(dataset_root, stage)
+            exchanged = True
             sync_exchange_parents(dataset_root, stage)
+            intent["phase"] = "exchanged"
+            write_publication_intent(lock, intent)
             if tree_hashes(stage) != expected_previous_hashes:
                 raise RuntimeError("dataset changed during inference; refusing to overwrite it")
             validate_source_recipe(dataset_root)
+            intent["phase"] = "committed"
+            write_publication_intent(lock, intent)
+            committed = True
+            write_publication_intent(lock, None)
+            shutil.rmtree(stage)
+            sync_directory(stage.parent)
         except BaseException as publication_error:
-            if not exchanged:
+            if committed:
                 raise
-            try:
-                exchange_directories(dataset_root, stage)
-                sync_exchange_parents(dataset_root, stage)
-            except BaseException as rollback_error:
-                rollback_error.add_note(
-                    f"rollback did not complete durably after {publication_error!r}; "
-                    f"inspect {dataset_root} and {stage} before retrying"
-                )
-                raise
+            if exchanged:
+                try:
+                    exchange_directories(dataset_root, stage)
+                    sync_exchange_parents(dataset_root, stage)
+                except BaseException as rollback_error:
+                    rollback_error.add_note(
+                        f"rollback did not complete durably after {publication_error!r}; "
+                        f"inspect {dataset_root} and {stage} before retrying"
+                    )
+                    raise
+            write_publication_intent(lock, None)
             raise
-        shutil.rmtree(stage)
-        sync_directory(stage.parent)
+        finally:
+            restore_signal_mask(previous_mask)
 
 
 def exchange_directories(left: Path, right: Path) -> None:
