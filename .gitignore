@@ -7,5 +7,6 @@ build/
 dist/
 .local-datasets/
 .local-models/
+datasets/.*.publication.lock
 *.egg-info/
 .DS_Store

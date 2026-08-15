@@ -1741,6 +1741,14 @@ def test_dense_generator_uses_owned_lock_and_disables_git_replacements(
         "show",
         "HEAD:file",
     ]
+    assert (
+        subprocess.run(
+            ["/usr/bin/git", "check-ignore", "--quiet", "datasets/.sample.publication.lock"],
+            cwd=ROOT,
+            check=False,
+        ).returncode
+        == 0
+    )
 
 
 def test_dense_publication_commits_exchange_before_removing_old_tree(
