@@ -43,13 +43,18 @@ def sha256_file(path: Path) -> str:
 
 
 def tree_hashes(root: Path) -> dict[str, str]:
-    """Hash every regular file in a source recipe, rejecting links."""
+    """Inventory every source-recipe entry, hashing files and rejecting special nodes."""
     hashes: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
         if path.is_symlink():
             raise ValueError(f"source recipe cannot contain symlinks: {path}")
-        if path.is_file():
-            hashes[path.relative_to(root).as_posix()] = sha256_file(path)
+        if path.is_dir():
+            hashes[relative] = "directory"
+        elif path.is_file():
+            hashes[relative] = f"file:{sha256_file(path)}"
+        else:
+            raise ValueError(f"source recipe contains an unsupported entry: {path}")
     return hashes
 
 
@@ -518,6 +523,9 @@ def main() -> None:
         raise RuntimeError(f"expected ultralytics 8.4.120, found {ultralytics_version}")
     revision = generator_revision()
     config = load_json(config_path)
+    inference_config = config.get("inference")
+    if not isinstance(inference_config, dict) or inference_config.get("class_isolated_passes") is not True:
+        raise ValueError("generator requires inference.class_isolated_passes to be true")
     config_bytes = canonical_json(config)
     output_root.mkdir(parents=True)
     recipe_snapshot = output_root / "source-recipe"
