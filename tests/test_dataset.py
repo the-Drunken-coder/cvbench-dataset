@@ -1742,7 +1742,10 @@ def test_dense_generator_rejects_non_locked_isolated_environment() -> None:
     )
 
     assert result.returncode != 0
-    assert "uv run --frozen --isolated --all-extras --no-editable python -I -S" in result.stderr
+    assert (
+        "uv run --frozen --isolated --all-extras --no-editable "
+        "python -I -S -X pycache_prefix=/dev/null"
+    ) in result.stderr
 
 
 def test_dense_generator_uses_owned_lock_and_disables_git_replacements(

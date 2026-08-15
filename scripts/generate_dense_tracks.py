@@ -9,7 +9,8 @@ import sys
 # also prevents sitecustomize and .pth hooks from running before the environment is verified.
 if __name__ == "__main__" and (not sys.flags.isolated or not sys.flags.no_site):
     raise RuntimeError(
-        "run with `uv run --frozen --isolated --all-extras --no-editable python -I -S`"
+        "run with `uv run --frozen --isolated --all-extras --no-editable "
+        "python -I -S -X pycache_prefix=/dev/null`"
     )
 
 import argparse
@@ -58,7 +59,8 @@ def require_locked_environment() -> None:
         or not sys.flags.no_site
     ):
         raise RuntimeError(
-            "run with `uv run --frozen --isolated --all-extras --no-editable python -I -S`"
+            "run with `uv run --frozen --isolated --all-extras --no-editable "
+            "python -I -S -X pycache_prefix=/dev/null`"
         )
 
 
