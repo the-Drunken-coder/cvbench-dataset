@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tarfile
 import zipfile
@@ -1705,6 +1706,43 @@ def test_dense_generator_syncs_staged_files_and_directories(
     assert sum(stat.S_ISDIR(mode) for mode in synced_modes) == 2
 
 
+def test_dense_generator_rejects_pythonpath_before_importing_modules(tmp_path: Path) -> None:
+    override = tmp_path / "override"
+    override.mkdir()
+    marker = tmp_path / "imported"
+    (override / "subprocess.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('imported')\n"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(override)
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "generate_dense_tracks.py"), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "python -I" in result.stderr
+    assert not marker.exists()
+
+
+def test_dense_generator_uses_owned_lock_and_disables_git_replacements(
+    dense_generator: ModuleType, tmp_path: Path
+) -> None:
+    dataset = tmp_path / "dataset"
+
+    assert dense_generator.publication_lock_path(dataset) == tmp_path / ".dataset.publication.lock"
+    assert dense_generator.git_command("show", "HEAD:file") == [
+        "/usr/bin/git",
+        "--no-replace-objects",
+        "show",
+        "HEAD:file",
+    ]
+
+
 def test_dense_publication_commits_exchange_before_removing_old_tree(
     dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1714,7 +1752,7 @@ def test_dense_publication_commits_exchange_before_removing_old_tree(
     dataset.mkdir()
     stage.mkdir(parents=True)
     expected = {"dataset.yaml": "file:hash"}
-    events: list[tuple[str, Path | None]] = []
+    events: list[tuple[str, object]] = []
 
     monkeypatch.setattr(dense_generator, "publication_lock_path", lambda _: tmp_path / "lock")
     monkeypatch.setattr(dense_generator, "tree_hashes", lambda _: expected)
@@ -1727,17 +1765,17 @@ def test_dense_publication_commits_exchange_before_removing_old_tree(
     monkeypatch.setattr(
         dense_generator,
         "sync_exchange_parents",
-        lambda *_: events.append(("sync-exchange", None)),
+        lambda left, right: events.append(("sync-exchange", (left, right))),
     )
     monkeypatch.setattr(
         dense_generator,
         "exchange_directories",
-        lambda *_: events.append(("exchange", None)),
+        lambda left, right: events.append(("exchange", (left, right))),
     )
     monkeypatch.setattr(
         dense_generator,
         "validate_source_recipe",
-        lambda _: events.append(("validate", dataset)),
+        lambda path: events.append(("validate", path)),
     )
     monkeypatch.setattr(
         dense_generator.shutil,
@@ -1750,8 +1788,8 @@ def test_dense_publication_commits_exchange_before_removing_old_tree(
     assert events == [
         ("sync-tree", stage),
         ("sync-directory", stage_parent),
-        ("exchange", None),
-        ("sync-exchange", None),
+        ("exchange", (dataset, stage)),
+        ("sync-exchange", (dataset, stage)),
         ("validate", dataset),
         ("remove-old", stage),
         ("sync-directory", stage_parent),
@@ -1766,7 +1804,11 @@ def test_dense_publication_durably_rolls_back_failed_validation(
     dataset.mkdir()
     stage.mkdir(parents=True)
     expected = {"dataset.yaml": "file:hash"}
-    events: list[str] = []
+    events: list[tuple[str, object]] = []
+
+    def fail_validation(path: Path) -> None:
+        events.append(("validate", path))
+        raise ValueError("invalid publication")
 
     monkeypatch.setattr(dense_generator, "publication_lock_path", lambda _: tmp_path / "lock")
     monkeypatch.setattr(dense_generator, "tree_hashes", lambda _: expected)
@@ -1775,17 +1817,17 @@ def test_dense_publication_durably_rolls_back_failed_validation(
     monkeypatch.setattr(
         dense_generator,
         "sync_exchange_parents",
-        lambda *_: events.append("sync-exchange"),
+        lambda left, right: events.append(("sync-exchange", (left, right))),
     )
     monkeypatch.setattr(
         dense_generator,
         "exchange_directories",
-        lambda *_: events.append("exchange"),
+        lambda left, right: events.append(("exchange", (left, right))),
     )
     monkeypatch.setattr(
         dense_generator,
         "validate_source_recipe",
-        lambda _: (_ for _ in ()).throw(ValueError("invalid publication")),
+        fail_validation,
     )
     monkeypatch.setattr(
         dense_generator.shutil,
@@ -1796,4 +1838,47 @@ def test_dense_publication_durably_rolls_back_failed_validation(
     with pytest.raises(ValueError, match="invalid publication"):
         dense_generator.apply_stage(dataset, stage, expected)
 
-    assert events == ["exchange", "sync-exchange", "exchange", "sync-exchange"]
+    assert events == [
+        ("exchange", (dataset, stage)),
+        ("sync-exchange", (dataset, stage)),
+        ("validate", dataset),
+        ("exchange", (dataset, stage)),
+        ("sync-exchange", (dataset, stage)),
+    ]
+
+
+def test_dense_publication_reports_failed_rollback_paths(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "dataset"
+    stage = tmp_path / "stage-parent" / "dataset"
+    dataset.mkdir()
+    stage.mkdir(parents=True)
+    expected = {"dataset.yaml": "file:hash"}
+    exchanges = 0
+
+    def exchange(*_: Path) -> None:
+        nonlocal exchanges
+        exchanges += 1
+        if exchanges == 2:
+            raise OSError("rollback exchange failed")
+
+    monkeypatch.setattr(dense_generator, "publication_lock_path", lambda _: tmp_path / "lock")
+    monkeypatch.setattr(dense_generator, "tree_hashes", lambda _: expected)
+    monkeypatch.setattr(dense_generator, "sync_tree", lambda _: None)
+    monkeypatch.setattr(dense_generator, "sync_directory", lambda _: None)
+    monkeypatch.setattr(dense_generator, "sync_exchange_parents", lambda *_: None)
+    monkeypatch.setattr(dense_generator, "exchange_directories", exchange)
+    monkeypatch.setattr(
+        dense_generator,
+        "validate_source_recipe",
+        lambda _: (_ for _ in ()).throw(ValueError("invalid publication")),
+    )
+
+    with pytest.raises(OSError, match="rollback exchange failed") as failure:
+        dense_generator.apply_stage(dataset, stage, expected)
+
+    note = "\n".join(failure.value.__notes__)
+    assert "invalid publication" in note
+    assert str(dataset) in note
+    assert str(stage) in note

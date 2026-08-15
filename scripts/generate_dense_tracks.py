@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import sys
 
-# This generator has no sibling imports. Remove its directory before loading dependencies so
-# ignored or untracked files beside the script cannot shadow the standard library or packages.
-if sys.path:
-    sys.path.pop(0)
+# Isolated mode ignores PYTHONPATH, user-site packages, and the script directory. Refuse to load
+# any shadowable module until the interpreter has established that boundary.
+if __name__ == "__main__" and not sys.flags.isolated:
+    raise RuntimeError("run the dense-track generator with `python -I`")
 
 import argparse
 import ctypes
@@ -61,8 +61,12 @@ def tree_hashes(root: Path) -> dict[str, str]:
 
 
 def publication_lock_path(dataset_root: Path) -> Path:
-    key = hashlib.sha256(os.fsencode(dataset_root.resolve())).hexdigest()
-    return Path(tempfile.gettempdir()) / f"cvbench-dataset-{key}.lock"
+    resolved = dataset_root.resolve()
+    return resolved.parent / f".{resolved.name}.publication.lock"
+
+
+def git_command(*arguments: str) -> list[str]:
+    return ["/usr/bin/git", "--no-replace-objects", *arguments]
 
 
 def sync_directory(path: Path) -> None:
@@ -115,7 +119,7 @@ def canonical_json(value: dict[str, Any]) -> bytes:
 def generator_revision() -> str:
     """Return the exact clean Git revision containing the running generator."""
     head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
+        git_command("rev-parse", "HEAD"),
         cwd=REPOSITORY_ROOT,
         check=True,
         capture_output=True,
@@ -124,7 +128,7 @@ def generator_revision() -> str:
     if len(head) != 40 or any(character not in "0123456789abcdef" for character in head):
         raise RuntimeError("generator repository HEAD is not a full Git commit")
     top_level = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
+        git_command("rev-parse", "--show-toplevel"),
         cwd=REPOSITORY_ROOT,
         check=True,
         capture_output=True,
@@ -133,7 +137,7 @@ def generator_revision() -> str:
     if Path(top_level).resolve() != REPOSITORY_ROOT:
         raise RuntimeError("generator repository root is not the Git top level")
     index_entries = subprocess.run(
-        ["git", "ls-files", "-v", "-z"],
+        git_command("ls-files", "-v", "-z"),
         cwd=REPOSITORY_ROOT,
         check=True,
         capture_output=True,
@@ -144,7 +148,7 @@ def generator_revision() -> str:
     script_path = Path(__file__).resolve()
     script_relative = script_path.relative_to(REPOSITORY_ROOT).as_posix()
     committed_script = subprocess.run(
-        ["git", "show", f"{head}:{script_relative}"],
+        git_command("show", f"{head}:{script_relative}"),
         cwd=REPOSITORY_ROOT,
         check=True,
         capture_output=True,
@@ -152,7 +156,7 @@ def generator_revision() -> str:
     if script_path.read_bytes() != committed_script:
         raise RuntimeError("running generator bytes do not match repository HEAD")
     status = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
+        git_command("status", "--porcelain", "--untracked-files=all"),
         cwd=REPOSITORY_ROOT,
         check=True,
         capture_output=True,
@@ -390,6 +394,7 @@ def updated_source(
     run_id = f"yolo26x-seg-tracktrack-{clip_id}"
     command = [
         "python",
+        "-I",
         "scripts/generate_dense_tracks.py",
         "--dataset-root",
         f"datasets/{DATASET_ID}",
@@ -517,9 +522,16 @@ def apply_stage(
             if tree_hashes(stage) != expected_previous_hashes:
                 raise RuntimeError("dataset changed during inference; refusing to overwrite it")
             validate_source_recipe(dataset_root)
-        except BaseException:
-            exchange_directories(dataset_root, stage)
-            sync_exchange_parents(dataset_root, stage)
+        except BaseException as publication_error:
+            try:
+                exchange_directories(dataset_root, stage)
+                sync_exchange_parents(dataset_root, stage)
+            except BaseException as rollback_error:
+                rollback_error.add_note(
+                    f"rollback did not complete durably after {publication_error!r}; "
+                    f"inspect {dataset_root} and {stage} before retrying"
+                )
+                raise
             raise
         shutil.rmtree(stage)
         sync_directory(stage.parent)
@@ -577,6 +589,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    if not sys.flags.isolated:
+        raise RuntimeError("run the dense-track generator with `python -I`")
     args = parse_args()
     dataset_root = args.dataset_root.resolve()
     source_dir = args.source_dir.resolve()
@@ -599,7 +613,7 @@ def main() -> None:
     config_bytes = canonical_json(config)
     supported_config = json.loads(
         subprocess.run(
-            ["git", "show", f"{revision}:{CONFIG_SOURCE}"],
+            git_command("show", f"{revision}:{CONFIG_SOURCE}"),
             cwd=REPOSITORY_ROOT,
             check=True,
             capture_output=True,
