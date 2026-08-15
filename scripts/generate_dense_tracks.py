@@ -101,6 +101,10 @@ def git_command(*arguments: str) -> list[str]:
     return ["/usr/bin/git", "--no-replace-objects", *arguments]
 
 
+def git_environment() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+
 def sync_directory(path: Path) -> None:
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
     flags |= getattr(os, "O_DIRECTORY", 0)
@@ -153,6 +157,7 @@ def generator_revision() -> str:
     head = subprocess.run(
         git_command("rev-parse", "HEAD"),
         cwd=REPOSITORY_ROOT,
+        env=git_environment(),
         check=True,
         capture_output=True,
         text=True,
@@ -162,6 +167,7 @@ def generator_revision() -> str:
     top_level = subprocess.run(
         git_command("rev-parse", "--show-toplevel"),
         cwd=REPOSITORY_ROOT,
+        env=git_environment(),
         check=True,
         capture_output=True,
         text=True,
@@ -171,6 +177,7 @@ def generator_revision() -> str:
     index_entries = subprocess.run(
         git_command("ls-files", "-v", "-z"),
         cwd=REPOSITORY_ROOT,
+        env=git_environment(),
         check=True,
         capture_output=True,
     ).stdout.decode().split("\0")
@@ -182,6 +189,7 @@ def generator_revision() -> str:
     committed_script = subprocess.run(
         git_command("show", f"{head}:{script_relative}"),
         cwd=REPOSITORY_ROOT,
+        env=git_environment(),
         check=True,
         capture_output=True,
     ).stdout
@@ -190,6 +198,7 @@ def generator_revision() -> str:
     status = subprocess.run(
         git_command("status", "--porcelain", "--untracked-files=all"),
         cwd=REPOSITORY_ROOT,
+        env=git_environment(),
         check=True,
         capture_output=True,
         text=True,
@@ -655,6 +664,7 @@ def main() -> None:
         subprocess.run(
             git_command("show", f"{revision}:{CONFIG_SOURCE}"),
             cwd=REPOSITORY_ROOT,
+            env=git_environment(),
             check=True,
             capture_output=True,
         ).stdout

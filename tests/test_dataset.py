@@ -1745,9 +1745,11 @@ def test_dense_generator_rejects_non_locked_isolated_environment() -> None:
 
 
 def test_dense_generator_uses_owned_lock_and_disables_git_replacements(
-    dense_generator: ModuleType, tmp_path: Path
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dataset = tmp_path / "dataset"
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "alternate.git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "alternate-worktree"))
 
     assert dense_generator.publication_lock_path(dataset) == tmp_path / ".dataset.publication.lock"
     assert dense_generator.git_command("show", "HEAD:file") == [
@@ -1756,11 +1758,13 @@ def test_dense_generator_uses_owned_lock_and_disables_git_replacements(
         "show",
         "HEAD:file",
     ]
+    assert not any(key.startswith("GIT_") for key in dense_generator.git_environment())
     assert (
         subprocess.run(
             ["/usr/bin/git", "check-ignore", "--quiet", "datasets/.sample.publication.lock"],
             cwd=ROOT,
             check=False,
+            env=dense_generator.git_environment(),
         ).returncode
         == 0
     )
