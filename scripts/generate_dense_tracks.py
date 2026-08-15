@@ -66,7 +66,7 @@ def generator_revision() -> str:
         text=True,
     ).stdout
     if status:
-        raise RuntimeError("generator repository has tracked changes; commit them before inference")
+        raise RuntimeError("generator repository has changes; commit them before inference")
     return head
 
 
@@ -97,7 +97,9 @@ def tracker_yaml(config: dict[str, Any], output: Path, reid_weights: Path) -> Pa
     return path
 
 
-def verified_sources(dataset_root: Path, source_dir: Path) -> dict[str, Path]:
+def verified_sources(
+    dataset_root: Path, source_dir: Path, snapshot_root: Path
+) -> dict[str, Path]:
     source_lock = load_json(dataset_root / "source-lock.json")
     expected_names = {clip["filename"] for clip in source_lock["clips"]}
     actual_names = {
@@ -109,12 +111,15 @@ def verified_sources(dataset_root: Path, source_dir: Path) -> dict[str, Path]:
         raise ValueError(
             f"source MP4 inventory mismatch: expected {sorted(expected_names)}, found {sorted(actual_names)}"
         )
+    snapshot_root.mkdir()
     verified: dict[str, Path] = {}
     for clip in source_lock["clips"]:
-        path = source_dir / clip["filename"]
-        if sha256_file(path) != clip["sha256"]:
-            raise ValueError(f"source hash mismatch: {path}")
-        verified[clip["id"]] = path
+        source = source_dir / clip["filename"]
+        snapshot = snapshot_root / clip["filename"]
+        shutil.copyfile(source, snapshot)
+        if sha256_file(snapshot) != clip["sha256"]:
+            raise ValueError(f"source hash mismatch: {source}")
+        verified[clip["id"]] = snapshot
     return verified
 
 
@@ -347,6 +352,7 @@ def stage_dataset(
     config: dict[str, Any],
     config_bytes: bytes,
     weights_sha256: str,
+    tracks_sha256_by_clip: dict[str, str],
     generator_revision: str,
     config_argument: Path,
     device: str,
@@ -378,8 +384,11 @@ def stage_dataset(
             clip_id = clip["id"]
             clip_root = stage / clip["path"]
             generated_tracks = output_root / clip_id / "tracks.jsonl"
-            tracks_sha256 = sha256_file(generated_tracks)
-            shutil.copyfile(generated_tracks, clip_root / "tracks.jsonl")
+            staged_tracks = clip_root / "tracks.jsonl"
+            shutil.copyfile(generated_tracks, staged_tracks)
+            tracks_sha256 = sha256_file(staged_tracks)
+            if tracks_sha256 != tracks_sha256_by_clip[clip_id]:
+                raise ValueError(f"{clip_id}: generated tracks changed before staging")
             source_path = clip_root / "source.json"
             source = updated_source(
                 load_json(source_path),
@@ -481,26 +490,30 @@ def main() -> None:
     if report.id != DATASET_ID:
         raise ValueError(f"this generator only accepts {DATASET_ID}")
     revision = generator_revision()
-    sources = verified_sources(dataset_root, source_dir)
     config = load_json(config_path)
     config_bytes = canonical_json(config)
     weights_sha256, reid_weights_sha256 = verify_pinned_weights(config, weights, reid_weights)
     output_root.mkdir(parents=True)
-    tracker_path = tracker_yaml(config, output_root, reid_weights)
-    model = YOLO(str(weights))
-    summaries = [
-        process_clip(
-            model,
-            dataset_root=dataset_root,
-            clip_id=clip_id,
-            video=video,
-            output_root=output_root,
-            config=config,
-            tracker_path=tracker_path,
-            device=args.device,
-        )
-        for clip_id, video in sources.items()
-    ]
+    snapshot_root = output_root / "verified-sources"
+    try:
+        sources = verified_sources(dataset_root, source_dir, snapshot_root)
+        tracker_path = tracker_yaml(config, output_root, reid_weights)
+        model = YOLO(str(weights))
+        summaries = [
+            process_clip(
+                model,
+                dataset_root=dataset_root,
+                clip_id=clip_id,
+                video=video,
+                output_root=output_root,
+                config=config,
+                tracker_path=tracker_path,
+                device=args.device,
+            )
+            for clip_id, video in sources.items()
+        ]
+    finally:
+        shutil.rmtree(snapshot_root, ignore_errors=True)
     manifest = {
         "schema_version": "cvbench.dense-tracking-run/v1",
         "generator_revision": revision,
@@ -518,6 +531,7 @@ def main() -> None:
             config,
             config_bytes,
             weights_sha256,
+            {summary["clip_id"]: summary["tracks_sha256"] for summary in summaries},
             revision,
             args.config,
             args.device,
