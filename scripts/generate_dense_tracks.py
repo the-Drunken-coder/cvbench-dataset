@@ -12,6 +12,7 @@ if sys.path:
 
 import argparse
 import ctypes
+import fcntl
 import hashlib
 import json
 import os
@@ -56,6 +57,11 @@ def tree_hashes(root: Path) -> dict[str, str]:
         else:
             raise ValueError(f"source recipe contains an unsupported entry: {path}")
     return hashes
+
+
+def publication_lock_path(dataset_root: Path) -> Path:
+    key = hashlib.sha256(os.fsencode(dataset_root.resolve())).hexdigest()
+    return Path(tempfile.gettempdir()) / f"cvbench-dataset-{key}.lock"
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -460,17 +466,21 @@ def stage_dataset(
 def apply_stage(
     dataset_root: Path, stage: Path, expected_previous_hashes: dict[str, str]
 ) -> None:
-    if tree_hashes(dataset_root) != expected_previous_hashes:
-        raise RuntimeError("dataset changed during inference; refusing to overwrite it")
-    exchange_directories(dataset_root, stage)
-    try:
-        if tree_hashes(stage) != expected_previous_hashes:
+    flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptor = os.open(publication_lock_path(dataset_root), flags, 0o600)
+    with os.fdopen(descriptor, "r+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if tree_hashes(dataset_root) != expected_previous_hashes:
             raise RuntimeError("dataset changed during inference; refusing to overwrite it")
-        validate_source_recipe(dataset_root)
-    except BaseException:
         exchange_directories(dataset_root, stage)
-        raise
-    shutil.rmtree(stage)
+        try:
+            if tree_hashes(stage) != expected_previous_hashes:
+                raise RuntimeError("dataset changed during inference; refusing to overwrite it")
+            validate_source_recipe(dataset_root)
+        except BaseException:
+            exchange_directories(dataset_root, stage)
+            raise
+        shutil.rmtree(stage)
 
 
 def exchange_directories(left: Path, right: Path) -> None:
