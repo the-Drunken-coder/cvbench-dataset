@@ -1,5 +1,11 @@
 {
   "schema_version": "cvbench.dense-tracking-config/v1",
+  "environment": {
+    "python_version": "3.12.13",
+    "platform": "macosx-11.0-arm64",
+    "uv_lock_sha256": "35ed5c8902bf8fe69fb8db6d349c1d9c7c0d8af4324be76bcf7013eb701ac5f4",
+    "site_packages_sha256": "99024ed1c137e090170d6a00fd79c2f27c8562702f17961fca39e0190efe2268"
+  },
   "model": {
     "name": "Ultralytics YOLO26x-seg COCO",
     "version": "YOLO26x-seg / ultralytics 8.4.120",

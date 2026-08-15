@@ -16,8 +16,10 @@ import fcntl
 import hashlib
 import json
 import os
+import platform
 import shutil
 import subprocess
+import sysconfig
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -103,6 +105,81 @@ def git_command(*arguments: str) -> list[str]:
 
 def git_environment() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+
+def site_packages_fingerprint() -> str:
+    site_packages = Path(sysconfig.get_paths()["purelib"]).resolve()
+    prefix = Path(sys.prefix).resolve()
+    if prefix not in site_packages.parents:
+        raise RuntimeError("site-packages is outside the active environment")
+    digest = hashlib.sha256()
+    for path in sorted(site_packages.rglob("*")):
+        relative = path.relative_to(site_packages)
+        if path.is_symlink():
+            raise RuntimeError(f"locked environment contains a symlink: {relative}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise RuntimeError(f"locked environment contains an unsupported entry: {relative}")
+        if "__pycache__" in relative.parts or path.suffix in {".pyc", ".pyo"}:
+            continue
+        top_level = relative.parts[0]
+        if top_level == "cvbench_dataset" or (
+            top_level.startswith("cvbench_dataset-") and top_level.endswith(".dist-info")
+        ):
+            continue
+        if path.name in {"RECORD", "direct_url.json"} and path.parent.name.endswith(".dist-info"):
+            continue
+        digest.update(relative.as_posix().encode())
+        digest.update(b"\0")
+        digest.update(bytes.fromhex(sha256_file(path)))
+    return digest.hexdigest()
+
+
+def verify_project_install(revision: str) -> None:
+    package_root = Path(validate_source_recipe.__code__.co_filename).resolve().parent
+    prefix = Path(sys.prefix).resolve()
+    if prefix not in package_root.parents or REPOSITORY_ROOT in package_root.parents:
+        raise RuntimeError("cvbench-dataset must be installed non-editably in the isolated environment")
+    source_prefix = "src/cvbench_dataset/"
+    tracked = subprocess.run(
+        git_command("ls-tree", "-r", "-z", "--name-only", revision, "--", "src/cvbench_dataset"),
+        cwd=REPOSITORY_ROOT,
+        env=git_environment(),
+        check=True,
+        capture_output=True,
+    ).stdout.decode().split("\0")
+    expected = {path.removeprefix(source_prefix) for path in tracked if path}
+    actual = {
+        path.relative_to(package_root).as_posix()
+        for path in package_root.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
+    }
+    if actual != expected:
+        raise RuntimeError("installed cvbench-dataset file inventory does not match repository HEAD")
+    for relative in sorted(expected):
+        committed = subprocess.run(
+            git_command("show", f"{revision}:{source_prefix}{relative}"),
+            cwd=REPOSITORY_ROOT,
+            env=git_environment(),
+            check=True,
+            capture_output=True,
+        ).stdout
+        if (package_root / relative).read_bytes() != committed:
+            raise RuntimeError(f"installed cvbench-dataset bytes do not match repository HEAD: {relative}")
+
+
+def verify_locked_artifacts(config: dict[str, Any], revision: str) -> None:
+    expected = config["environment"]
+    actual = {
+        "python_version": platform.python_version(),
+        "platform": sysconfig.get_platform(),
+        "uv_lock_sha256": sha256_file(REPOSITORY_ROOT / "uv.lock"),
+        "site_packages_sha256": site_packages_fingerprint(),
+    }
+    if actual != expected:
+        raise RuntimeError(f"installed environment does not match the canonical lock: {actual}")
+    verify_project_install(revision)
 
 
 def sync_directory(path: Path) -> None:
@@ -671,6 +748,7 @@ def main() -> None:
     )
     if not isinstance(supported_config, dict) or config_bytes != canonical_json(supported_config):
         raise ValueError("generator config must match the canonical config at repository HEAD")
+    verify_locked_artifacts(config, revision)
     output_root.mkdir(parents=True)
     recipe_snapshot = output_root / "source-recipe"
     source_snapshot = output_root / "verified-sources"

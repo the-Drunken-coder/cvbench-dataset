@@ -1770,6 +1770,25 @@ def test_dense_generator_uses_owned_lock_and_disables_git_replacements(
     )
 
 
+def test_dense_generator_fingerprint_binds_installed_bytes(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    site_packages = tmp_path / "lib" / "python3.12" / "site-packages"
+    package = site_packages / "example"
+    package.mkdir(parents=True)
+    source = package / "__init__.py"
+    source.write_text("VALUE = 1\n")
+    monkeypatch.setattr(dense_generator.sys, "prefix", str(tmp_path))
+    monkeypatch.setattr(
+        dense_generator.sysconfig, "get_paths", lambda: {"purelib": str(site_packages)}
+    )
+
+    original = dense_generator.site_packages_fingerprint()
+    source.write_text("VALUE = 2\n")
+
+    assert dense_generator.site_packages_fingerprint() != original
+
+
 def test_dense_publication_commits_exchange_before_removing_old_tree(
     dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
