@@ -18,6 +18,7 @@ import json
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import sysconfig
 import tempfile
@@ -532,7 +533,7 @@ def updated_source(
         "--reid-weights",
         "<sha256-pinned-yolo26n-cls.pt>",
         "--config",
-        f"datasets/{DATASET_ID}/{CONFIG_ARTIFACT}",
+        CONFIG_SOURCE,
         "--output-dir",
         "<new-ignored-output-directory>",
         "--device",
@@ -643,13 +644,21 @@ def apply_stage(
             raise RuntimeError("dataset changed during inference; refusing to overwrite it")
         sync_tree(stage)
         sync_directory(stage.parent)
-        exchange_directories(dataset_root, stage)
+        exchanged = False
         try:
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+            try:
+                exchange_directories(dataset_root, stage)
+                exchanged = True
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
             sync_exchange_parents(dataset_root, stage)
             if tree_hashes(stage) != expected_previous_hashes:
                 raise RuntimeError("dataset changed during inference; refusing to overwrite it")
             validate_source_recipe(dataset_root)
         except BaseException as publication_error:
+            if not exchanged:
+                raise
             try:
                 exchange_directories(dataset_root, stage)
                 sync_exchange_parents(dataset_root, stage)

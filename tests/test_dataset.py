@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -1789,6 +1790,33 @@ def test_dense_generator_fingerprint_binds_installed_bytes(
     assert dense_generator.site_packages_fingerprint() != original
 
 
+def test_dense_generator_replay_uses_config_from_recorded_revision(
+    dense_generator: ModuleType,
+) -> None:
+    config = {
+        "model": {
+            "name": "detector",
+            "version": "1",
+            "weights_uri": "https://example.invalid/detector.pt",
+            "license": {"spdx": "MIT"},
+        },
+        "reid_model": {"name": "reid", "version": "1"},
+    }
+    updated = dense_generator.updated_source(
+        {},
+        clip_id="clip",
+        config=config,
+        config_sha256="1" * 64,
+        weights_sha256="2" * 64,
+        raw_output_sha256="3" * 64,
+        generator_revision="4" * 40,
+        device="mps",
+    )
+    command = updated["model_runs"][0]["command"]
+
+    assert command[command.index("--config") + 1] == dense_generator.CONFIG_SOURCE
+
+
 def test_dense_publication_commits_exchange_before_removing_old_tree(
     dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1840,6 +1868,39 @@ def test_dense_publication_commits_exchange_before_removing_old_tree(
         ("remove-old", stage),
         ("sync-directory", stage_parent),
     ]
+
+
+def test_dense_publication_rolls_back_interrupt_after_exchange(
+    dense_generator: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = tmp_path / "dataset"
+    stage = tmp_path / "stage-parent" / "dataset"
+    dataset.mkdir()
+    stage.mkdir(parents=True)
+    expected = {"dataset.yaml": "file:hash"}
+    exchanges = 0
+
+    def exchange(*_: Path) -> None:
+        nonlocal exchanges
+        exchanges += 1
+
+    def interrupt_on_unblock(operation: int, _: set[signal.Signals]) -> set[signal.Signals]:
+        if operation == signal.SIG_BLOCK:
+            return set()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(dense_generator, "publication_lock_path", lambda _: tmp_path / "lock")
+    monkeypatch.setattr(dense_generator, "tree_hashes", lambda _: expected)
+    monkeypatch.setattr(dense_generator, "sync_tree", lambda _: None)
+    monkeypatch.setattr(dense_generator, "sync_directory", lambda _: None)
+    monkeypatch.setattr(dense_generator, "sync_exchange_parents", lambda *_: None)
+    monkeypatch.setattr(dense_generator, "exchange_directories", exchange)
+    monkeypatch.setattr(dense_generator.signal, "pthread_sigmask", interrupt_on_unblock)
+
+    with pytest.raises(KeyboardInterrupt):
+        dense_generator.apply_stage(dataset, stage, expected)
+
+    assert exchanges == 2
 
 
 def test_dense_publication_durably_rolls_back_failed_validation(
