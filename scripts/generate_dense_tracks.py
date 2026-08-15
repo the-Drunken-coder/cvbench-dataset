@@ -527,7 +527,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path(CONFIG_SOURCE),
+        default=REPOSITORY_ROOT / CONFIG_SOURCE,
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="mps")
